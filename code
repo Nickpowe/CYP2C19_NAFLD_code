@@ -1,0 +1,2822 @@
+#################### Initial Stuff #############################################
+library(readxl)
+library(org.Hs.eg.db)
+library(annotate)
+library(ggplot2)
+library(ggpubr)
+library(grid)
+library(gridExtra)
+library(ggrepel)
+library(dplyr)
+#library(plotly)
+#library(rgl)
+#library(plot3D)
+library(car)
+library(e1071)
+# library(grid)
+# library(gridExtra)
+# library(ggrepel)
+
+#setwd("directory/NASH")
+
+#NASH_RNAseq_data_gene_counts <- read.delim("Directory/NASH_RNAseq_data_gene_counts.txt")
+
+#NASH_RNAseq_data_sample_list <- read.delim("Directory/NASH_RNAseq_data_sample_list.txt")
+NASH_RNAseq_data_sample_list <- read.delim("directory/NASH_RNAseq_data_sample_list.txt")
+
+#Lilly_Biopsy_Phenotype <- read_excel("Directory/Lilly Biopsy Phenotype.xlsx")
+#phenotypes_pruned <- read.csv("Directory/phenotypes_pruned.csv")
+phenotypes_pruned <- read.csv("directory/phenotypes_pruned.csv", stringsAsFactors=FALSE)
+
+#`Transporters.and.Pharmacogenes.(Expanded)` <- read.csv("Directory/Transporters and Pharmacogenes (Expanded).csv", header=FALSE)
+#`Transporters.and.Pharmacogenes.(Core list)` <- read.csv("Directory/Transporters and Pharmacogenes (Core list).csv", header=FALSE)
+`Transporters.and.Pharmacogenes.(Expanded)` <- read.csv("directory/Transporters and Pharmacogenes (Expanded).csv", header=FALSE)
+
+############# Convert Entrez to Symbol & Match IDs #################################################################
+
+a <- phenotypes_pruned
+colnames(a)[1] <- "study_ID"
+a <- merge(a,NASH_RNAseq_data_sample_list,by="study_ID")
+rm(phenotypes_pruned,NASH_RNAseq_data_sample_list)
+a$ID_in_data <- gsub("-","\\.",a$ID_in_data)
+row.names(a) <- a$ID_in_data
+a <- a[-c(1,12)]
+
+# b <- NASH_RNAseq_data_gene_counts
+# b$EntrezGene <- as.character(b$EntrezGene)
+# b$EntrezGene <- getSYMBOL(b$EntrezGene,data='org.Hs.eg') #540 NA values created
+# colnames(b)[1] <- "Gene"
+# rm(NASH_RNAseq_data_gene_counts)
+# 
+# b_raw <- b
+# b_sum <- b[1,]
+# b_sum[1,1] <- "total"
+# 
+# for(n in 2:ncol(b_sum)){
+#   b_sum[1,n] <- sum(b_raw[,n]) #adds up sum of gene reads per sample
+# }
+# 
+# for(n in 2:ncol(b)){
+#   print(n)
+#   for(i in 1:nrow(b)){
+#     b[i,n] <- (b_raw[i,n]/b_sum[1,n])*1000000 #normalizes reads to sum of all reads per sample
+#   }
+# }
+# 
+# b <- subset(b,b$Gene!="NA")
+# row.names(b) <- b$Gene
+# b <- b[-c(1)]
+# b <- log(b) #log
+# write.table(b,"NASH_RNAseq_data_logTPM_norm.txt")
+#b <- read.csv("Directory/data frame ouputs/NASH_RNAseq_data_logTPM_norm.txt", sep="")
+b <- read.csv("directory/NASH_RNAseq_data_logTPM_norm.txt", row.names=1, sep="", stringsAsFactors=FALSE)
+
+############# Filter to pharmacogenes #######################################################################################################
+
+c <- `Transporters.and.Pharmacogenes.(Expanded)`
+rm(`Transporters.and.Pharmacogenes.(Expanded)`)
+c <- c$V2
+b1 <- subset(b,rownames(b) %in% c)
+
+############# Prep data for analysis #############################################
+
+b2 <- as.data.frame(t(b1))
+#for values of zero, log(0) returns -Inf... these are still good data, so change to lowest value across all samples
+#this is a conservative approach
+
+#b2[b2=="-Inf"] <- NA
+
+for(n in 1:ncol(b2)){
+  x <- min(b2[,n][is.finite(b2[,n])])
+  y <- "-Inf"
+  for(i in 1:nrow(b2)){
+    b2[i,n][b2[i,n] %in% y] <- x
+  }
+}
+
+#write.csv(b2,file = "NASH_RNAseq_data_logTPM_adme_repInf.csv",row.names = T,quote = F)
+
+d <- merge(a,b2,by=0)
+p.gene.lm <- as.data.frame(row.names(b1))
+colnames(p.gene.lm) <- "gene"
+c <- row.names(b1)
+
+################## Regressions for NAS ###################################
+for(n in 1:nrow(p.gene.lm)){
+  x <- c[n]
+  #d1 <- d[c("NAS_score",x)]
+  d1 <- d[c("nas",x)]
+  colnames(d1) <- c("NAS","RNA")
+  fit <- summary(lm(RNA~NAS,data=d1))
+  p.gene.lm[n,2] <- x
+  p.gene.lm[n,3] <- fit$coefficients[2]
+  p.gene.lm[n,4] <- fit$coefficients[2,4]
+  p.gene.lm[n,5] <- fit$r.squared
+}
+p.gene.lm <- p.gene.lm[-c(1)]
+colnames(p.gene.lm) <- c("gene","slope","p_value","r_squared")
+p.gene.lm$p_value_bonferonni <- p.gene.lm$p_value*(length(c))
+p.gene.lm <- p.gene.lm[order(p.gene.lm$p_value_bonferonni),]
+row.names(p.gene.lm) <- NULL
+
+t1 <- subset(p.gene.lm, p.gene.lm[5]<=0.05)
+t1$group <- "NAS Regression"
+write.csv(p.gene.lm,"pharmacogene_NAS_regression_results_logTPM.csv")
+
+############# Plot regressions ####################################################
+
+regr <- function(n){
+  x <- p.gene.lm$gene[n]
+  d1 <- d[c("nas",x)]
+  colnames(d1) <- c("NAS","RNA")
+  fit <- summary(lm(RNA~NAS,data=d1))
+  ggplot()+geom_point(data=d1,aes(x=NAS,y=RNA),size=1)+
+    geom_smooth(data=d1,aes(x=NAS,y=RNA),method=lm)+
+    ylab(paste0(x))+
+    xlab(NULL)+
+    #xlab("NAFLD Activity Score (NAS)")+
+    theme(text = element_text(size=10),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          panel.background=element_blank(),
+          axis.line=element_line(colour="black"))
+}
+
+
+nas <- ggarrange(regr(1),regr(2),regr(3),regr(4),regr(5),regr(6),regr(7),regr(8),regr(9),
+          regr(10),regr(11),regr(12),regr(13),regr(14),
+          nrow = 2,
+          ncol = 7
+          #labels = "AUTO"
+          )
+nas <- annotate_figure(nas, top = textGrob(" "), bottom = textGrob("NAFLD Activity Score (0-8)", gp = gpar(cex = 1)),fill_palette(NULL))
+nas
+#ggsave("regression_plots_logTPM_NAS.tiff",plot = last_plot(),width = 8,height = 8)
+#write.csv()
+
+############# S-plot #############################################
+p.gene.lm$label <- p.gene.lm$gene
+p.gene.lm$BH <- p.adjust(p.gene.lm$p_value,method = "BH")
+BHlim <- max(subset(p.gene.lm,p.gene.lm$BH<.05)$p_value_bonferonni)
+
+nas_s <- ggplot()+geom_point(data=p.gene.lm,
+                    mapping=aes(y=p_value_bonferonni,x=reorder(gene,p_value_bonferonni),
+                                color=slope),alpha=0.8,size=1.5)+
+  scale_color_gradientn(colours=c("firebrick","goldenrod","dodgerblue")
+                        #limits=c(0,0.05),
+                        #breaks=c(0,0.025,0.05),
+                        #na.value="grey"
+                        )+
+  geom_hline(yintercept = 0.05,
+             linetype="dashed",
+             color="black")+
+  geom_hline(yintercept = BHlim,
+             linetype="dashed",
+             color="grey50")+
+  geom_hline(yintercept = .05*length(c),
+             linetype="dashed",
+             color="grey80")+
+  theme(axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(size=0.5),
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_text(size=8),
+        legend.text = element_text(size=8),
+        axis.title = element_text(size=10),
+        plot.title = element_text(hjust = 0.5)
+        #legend.position = "top"
+        )+
+  #scale_y_continuous(breaks = seq(-7,7,by=2))+
+  #ggtitle("NAFLD Activity Score (0-8)")+
+  xlab("Gene")+ylab("Bonferroni Corrected\n P-value")+
+  geom_label_repel(data=subset(p.gene.lm, p.gene.lm$p_value_bonferonni<0.05 |
+                                 p.gene.lm$gene=="CYP1A2" |
+                                 p.gene.lm$gene=="CYP3A4" |
+                                 p.gene.lm$gene=="CYP2E1" |
+                                 p.gene.lm$gene=="CYP2C19" |
+                                 p.gene.lm$gene=="CYP2D6" |
+                                 p.gene.lm$gene=="CYP2B6" |
+                                 p.gene.lm$gene=="CYP2C9" |
+                                 p.gene.lm$gene=="CYP3A5" |
+                                 p.gene.lm$gene=="CYP2C8"
+                                 ),
+                  aes(y=p_value_bonferonni,x=gene,label=gene),
+                  nudge_x = 50,
+                  size=3,
+                  nudge_y = -1.5,
+                  max.overlaps = 20,
+                  #box.padding = 0.3,
+                  #point.padding = 0.5,
+                  #force = 200
+                  min.segment.length = 0)+
+  scale_y_log10()+
+  geom_text(aes(200,0.03,
+                label="BONFERRONI SIGNIFICANCE THRESHOLD"),
+                size=2.5)+
+  geom_text(aes(2,BHlim+2,
+                label="BH THRESHOLD"),
+                color="grey50",size=2.5,hjust=0)+
+  geom_text(aes(2,(.05*length(c))+10,
+                label="UNADJUSTED ALPHA"),
+            color="grey80",size=2.5,hjust=0)
+
+nas_s
+#ggsave("p_value_s_plot_logTPM_NAS.tiff",plot = last_plot(),width = 8,height = 4)
+
+plot <- ggarrange(nas,nas_s,
+          nrow = 2,
+          ncol = 1,
+          labels = "AUTO"
+          #heights = c(5, 6) 
+)
+plot
+ggsave("Figure1.tiff",plot = plot,width = 8,height = 6,bg = "white")
+
+############# volcano #############
+
+BHlim <- max(subset(p.gene.lm,p.gene.lm$BH<.05)$p_value)
+nas_volc <- ggplot()+geom_point(data=p.gene.lm,
+                             mapping=aes(y=-log10(p_value),x=slope,
+                                         color=-log10(p_value)),
+                             alpha=0.8,
+                             size=3)+
+  scale_color_continuous(limits=c(-log10(BHlim),10))+
+  geom_hline(yintercept = -log10(0.05),
+             linetype="dashed",
+             color="grey80")+
+  geom_hline(yintercept = -log10(BHlim),
+             linetype="dashed",
+             color="grey50")+
+  geom_hline(yintercept = -log10(.05/length(c)),
+             linetype="dashed",
+             color="black")+
+  geom_text(aes(min(p.gene.lm$slope),-log10(.05/length(c))+.15,
+                label="BONFERRONI SIGNIFICANCE THRESHOLD"),
+            size=2.5,hjust=0)+
+  geom_text(aes(min(p.gene.lm$slope),-log10(BHlim)+.15,
+                label="BH THRESHOLD"),
+            color="grey50",size=2.5,hjust=0)+
+  geom_text(aes(min(p.gene.lm$slope),-log10(0.05)+.15,
+                label="UNADJUSTED ALPHA"),
+            color="grey80",size=2.5,hjust=0)+
+  theme(panel.background = element_blank(),
+        axis.line = element_line(size=0.5),
+        legend.position = "none"
+        )+
+  scale_y_continuous(expand = c(.02,0),limits = c(0,10))+
+  scale_x_continuous(expand = c(.02,0))+
+  #ggtitle("NAFLD Activity Score")+
+  xlab("Slope")+ylab("-Log10 P-value")+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni<.05 & slope<0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = -.20,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 10,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni<.05 & slope>0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = .20,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 5,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni>=.05 & BH<.05 & slope<0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = -.15,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 3.5,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni>=.05 & BH<.05 & slope>0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = .20,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 1.5,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(BH>=.05 & slope<0 & gene %in% 
+                                                               c("CYP1A2","CYP3A4","CYP2E1","CYP2C19",
+                                                                 "CYP2D6","CYP2B6","CYP2C9","CYP3A5","CYP2C8")
+                                                             ,gene,"")),
+                                   aes(y=-log10(p_value),x=slope,label=label),
+                                   #xlim = c(.2,.4),
+                                   #ylim = c(7,10),
+                                   nudge_x = -.20,
+                                   size=2.5,
+                                   #color="black",
+                                   segment.color = "grey80",
+                                   nudge_y = -1.2,
+                                   max.overlaps = 20,
+                                   #box.padding = 1,
+                                   #point.padding = 0.5,
+                                   #force_pull = 2,
+                                   #force = 200,
+                                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(BH>=.05 & slope>0 & gene %in% 
+                                                               c("CYP1A2","CYP3A4","CYP2E1","CYP2C19",
+                                                                 "CYP2D6","CYP2B6","CYP2C9","CYP3A5","CYP2C8")
+                                                             ,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = .25,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = -.75,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)
+  
+nas_volc
+
+#ggsave("Supp_Figure1.tiff",plot = nas_volc,width = 8,height = 6,bg = "white")
+
+plot1 <- ggarrange(nas,nas_volc,
+                  nrow = 2,
+                  ncol = 1,
+                  labels = "AUTO",
+                  heights = c(4, 6) 
+)
+#plot1
+ggsave("Figure1_alt.tiff",plot = plot1,width = 8,height = 8,bg = "white")
+
+############# T-test ###########################################
+
+d2 <- subset(d,d$nas>4)
+d3 <- subset(d,d$nas<5)
+tnas <- data.frame()
+for(n in 1:length(c)){
+  x <- c[[n]]
+  xx <- t.test(d2[[x]],d3[[x]])
+  tnas[n,1] <- x
+  tnas[n,2] <- xx[["p.value"]]
+}
+tnas$V3 <- tnas$V2*nrow(tnas)
+tnassig <- subset(tnas,tnas$V3<0.05)
+tnassig <- tnassig[order(tnassig$V3),]
+row.names(tnassig) <- tnassig$V1
+tnassig <- tnassig[-c(1)]
+
+d4 <- subset(d,select=c("nas",row.names(tnassig)))
+d4$group <- d4$nas>4
+d4$group <- gsub(TRUE,"NAS \u2265 5",d4$group)
+d4$group <- gsub(FALSE,"NAS \u2264 4",d4$group)
+
+d5 <- reshape2::melt(d4,c("nas","group"))
+d5$variable <- factor(d5$variable)
+
+t_nas <- ggplot()+
+  geom_point(data=d5,aes(x=variable,y=value,fill=group),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = .75),size=0.3)+
+  geom_boxplot(data=d5,aes(x=variable,y=value,fill=group),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust = .5),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank(),
+    axis.line = element_line(),
+    legend.position = "top")+
+  ylab("Log Transcripts Per Million")
+t_nas
+
+tnassig$gene <- rownames(tnassig)
+tnassig[4:6] <- NA
+tnassig <- tnassig[c(3,4,1,5,2,6)]
+colnames(tnassig) <- colnames(t1)
+tnassig$group <- "NAS T-test"
+
+table1 <- rbind(t1,tnassig)
+
+ggsave("t_tests_NAS_logTPM.tiff",plot = tt,width = 4,height = 4)
+
+
+################## Regressions for fibrosis ###################################
+
+p.gene.lm <- as.data.frame(row.names(b1))
+colnames(p.gene.lm) <- "gene"
+c <- row.names(b1)
+
+for(n in 1:nrow(p.gene.lm)){
+  x <- c[n]
+  d1 <- d[c("fibrosis",x)]
+  colnames(d1) <- c("fibrosis","RNA")
+  fit <- summary(lm(RNA~fibrosis,data=d1))
+  p.gene.lm[n,2] <- x
+  p.gene.lm[n,3] <- fit$coefficients[2]
+  p.gene.lm[n,4] <- fit$coefficients[2,4]
+  p.gene.lm[n,5] <- fit$r.squared
+}
+p.gene.lm <- p.gene.lm[-c(1)]
+colnames(p.gene.lm) <- c("gene","slope","p_value","r_squared")
+p.gene.lm$p_value_bonferonni <- p.gene.lm$p_value*(length(c))
+p.gene.lm <- p.gene.lm[order(p.gene.lm$p_value_bonferonni),]
+row.names(p.gene.lm) <- NULL
+
+t2 <- subset(p.gene.lm, p.gene.lm[5]<=0.05)
+t2$group <- "Fibrosis Regression"
+table1 <- rbind(table1,t2)
+write.csv(p.gene.lm,"pharmacogene_fibrosis_regression_results_logTPM.csv")
+
+############# Plot regressions ####################################################
+
+regr <- function(n){
+  x <- p.gene.lm$gene[n]
+  d1 <- d[c("fibrosis",x)]
+  colnames(d1) <- c("fibrosis","RNA")
+  fit <- summary(lm(RNA~fibrosis,data=d1))
+  ggplot()+geom_point(data=d1,aes(y=RNA,x=fibrosis))+
+    geom_smooth(data=d1,aes(y=RNA,x=fibrosis),method=lm)+
+    ylab(paste0(x))+
+    xlab(NULL)+
+    #xlab(paste0("Fibrosis (0-4)","\nR-squared: ",round(fit$r.squared,2)))+
+    theme(text = element_text(size=10),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          panel.background=element_blank(),
+          axis.line=element_line(colour="black"))
+}
+
+list <- list()
+psig <- subset(p.gene.lm,p.gene.lm$p_value_bonferonni<0.05)
+for(n in 1:nrow(psig)){
+  A <- regr(n)
+  list[[n]] <- A 
+}
+
+#write.table(psig,"fibrosis_hits_regression.txt")
+
+fib <- ggarrange(plotlist = list,ncol=6,nrow=4)
+fib <- annotate_figure(fib, top = textGrob(" "), bottom = textGrob("Fibrosis Grade (0-4)", gp = gpar(cex = 1)),fill_palette(NULL))
+fib
+
+#ggsave("regression_plots_fibrosis_logTPM.tiff",plot = last_plot(),width = 8,height = 8)
+
+############# S-plot #############################################
+
+p.gene.lm$label <- p.gene.lm$gene
+p.gene.lm$BH <- p.adjust(p.gene.lm$p_value,method = "BH")
+BHlim <- max(subset(p.gene.lm,p.gene.lm$BH<.05)$p_value_bonferonni)
+
+s_fib <- ggplot()+geom_point(data=p.gene.lm,
+                    mapping=aes(y=p_value_bonferonni,x=reorder(gene,p_value_bonferonni),
+                                color=slope),alpha=0.8,size=1.5)+
+  scale_color_gradientn(colours=c("firebrick","goldenrod","dodgerblue")
+                        #limits=c(0,0.05),
+                        #breaks=c(0,0.025,0.05),
+                        #na.value="grey"
+  )+
+  geom_hline(yintercept = 0.05,
+             linetype="dashed",
+             color="black")+
+  geom_hline(yintercept = BHlim,
+             linetype="dashed",
+             color="grey50")+
+  geom_hline(yintercept = .05*length(c),
+             linetype="dashed",
+             color="grey80")+
+  theme(axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(size=0.5),
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_text(size=8),
+        legend.text = element_text(size=8),
+        axis.title = element_text(size=10))+
+  #scale_y_continuous(breaks = seq(-7,7,by=2))+
+  #ggtitle("Fibrosis")+
+  xlab("Gene")+ylab("Bonferroni Corrected\nP-value")+
+  geom_label_repel(data=subset(p.gene.lm, p.gene.lm$p_value_bonferonni<0.05 |
+                                 p.gene.lm$gene=="CYP1A2" |
+                                 p.gene.lm$gene=="CYP3A4" |
+                                 p.gene.lm$gene=="CYP2E1" |
+                                 p.gene.lm$gene=="CYP2C19" |
+                                 p.gene.lm$gene=="CYP2D6" |
+                                 p.gene.lm$gene=="CYP2B6" |
+                                 p.gene.lm$gene=="CYP2C9" |
+                                 p.gene.lm$gene=="CYP3A5" |
+                                 p.gene.lm$gene=="CYP2C8"
+  ),
+  aes(y=p_value_bonferonni,x=gene,label=gene),
+  nudge_x = 50,
+  size=3,
+  nudge_y = -1.5,
+  #box.padding = 0.3,
+  #point.padding = 0.5,
+  #force = 200
+  min.segment.length = 0,
+  max.overlaps = 20)+
+  scale_y_log10()+
+  geom_text(aes(200,0.03,
+                label="BONFERRONI SIGNIFICANCE THRESHOLD"),
+            size=2.5)+
+  geom_text(aes(2,BHlim+2,
+                label="BH THRESHOLD"),
+            color="grey50",size=2.5,hjust=0)+
+  geom_text(aes(2,(.05*length(c))+10,
+                label="UNADJUSTED ALPHA"),
+            color="grey80",size=2.5,hjust=0)
+
+plot <- ggarrange(fib,s_fib,
+                  nrow = 2,
+                  ncol = 1,
+                  labels = "AUTO"
+                  #heights = c(5, 6) 
+)
+plot
+ggsave("Figure3.tiff",plot = plot,width = 8,height = 8,bg = "white")
+
+############# volcano #############
+
+BHlim <- max(subset(p.gene.lm,p.gene.lm$BH<.05)$p_value)
+fib_volc <- ggplot()+geom_point(data=p.gene.lm,
+                                mapping=aes(y=-log10(p_value),x=slope,
+                                            color=-log10(p_value)),
+                                alpha=0.8,
+                                size=3)+
+  scale_color_continuous(limits=c(-log10(BHlim),10))+
+  geom_hline(yintercept = -log10(0.05),
+             linetype="dashed",
+             color="grey80")+
+  geom_hline(yintercept = -log10(BHlim),
+             linetype="dashed",
+             color="grey50")+
+  geom_hline(yintercept = -log10(.05/length(c)),
+             linetype="dashed",
+             color="black")+
+  geom_text(aes(min(p.gene.lm$slope),-log10(.05/length(c))+.15,
+                label="BONFERRONI SIGNIFICANCE THRESHOLD"),
+            size=2.5,hjust=0)+
+  geom_text(aes(min(p.gene.lm$slope),-log10(BHlim)+.15,
+                label="BH THRESHOLD"),
+            color="grey50",size=2.5,hjust=0)+
+  geom_text(aes(min(p.gene.lm$slope),-log10(0.05)+.15,
+                label="UNADJUSTED ALPHA"),
+            color="grey80",size=2.5,hjust=0)+
+  theme(panel.background = element_blank(),
+        axis.line = element_line(size=0.5),
+        legend.position = "none"
+  )+
+  scale_y_continuous(expand = c(.02,0),limits = c(0,9))+
+  scale_x_continuous(expand = c(.05,0))+
+  #ggtitle("NAFLD Activity Score")+
+  xlab("Slope")+ylab("-Log10 P-value")+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni<.05 & slope<0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = 0,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 5.5,
+                   max.overlaps = 20,
+                   box.padding = .4,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni<.05 & slope>0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   xlim = c(0,.4),
+                   ylim = c(6,9),
+                   #nudge_x = .20,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 2,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni>=.05 & BH<.015 & slope<0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   xlim = c(min(p.gene.lm$slope),0),
+                   ylim = c(4,7),
+                   nudge_x = -.15,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 2,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(BH>=.015 & BH<=.05 & slope<0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   xlim = c(min(p.gene.lm$slope),-.1),
+                   ylim = c(2,3.7),
+                   #nudge_x = -.1,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = .2,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni>=.05 & BH<.05 & slope>0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = .10,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   #nudge_y = 1,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(BH>=.05 & slope<0 & gene %in%
+                                                               c("CYP1A2","CYP3A4","CYP2E1","CYP2C19",
+                                                                 "CYP2D6","CYP2B6","CYP2C9","CYP3A5","CYP2C8")
+                                                             ,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   ylim = c(0,1.2),
+                   nudge_x = -.20,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   #nudge_y = -1.2,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(BH>=.05 & slope>0 & gene %in%
+                                                               c("CYP1A2","CYP3A4","CYP2E1","CYP2C19",
+                                                                 "CYP2D6","CYP2B6","CYP2C9","CYP3A5","CYP2C8")
+                                                             ,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = .25,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = -.75,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)
+
+fib_volc
+
+#ggsave("Supp_Figure2.tiff",plot = fib_volc,width = 8,height = 6,bg = "white")
+
+plot1 <- ggarrange(fib,fib_volc,
+                   nrow = 2,
+                   ncol = 1,
+                   labels = "AUTO",
+                   heights = c(4, 6) 
+)
+#plot1
+ggsave("Figure3_alt.tiff",plot = plot1,width = 8,height = 8,bg = "white")
+
+############# T-test 0 vs rest ###########################################
+
+d2 <- subset(d,d$fibrosis==0)
+d3 <- subset(d,d$fibrosis!=0)
+tnas <- data.frame()
+for(n in 1:length(c)){
+  x <- c[[n]]
+  xx <- t.test(d2[[x]],d3[[x]])
+  tnas[n,1] <- x
+  tnas[n,2] <- xx[["p.value"]]
+}
+tnas$V3 <- tnas$V2*nrow(tnas)
+tnassig <- subset(tnas,tnas$V3<0.05)
+tnassig <- tnassig[order(tnassig$V3),]
+row.names(tnassig) <- tnassig$V1
+tnassig <- tnassig[-c(1)]
+d4 <- subset(d,select=c("fibrosis",row.names(tnassig)))
+d4$group <- d4$fibrosis==0
+d4$group <- gsub(TRUE,"Fibrosis = 0",d4$group)
+d4$group <- gsub(FALSE,"Fibrosis \u2265 1",d4$group)
+
+d5 <- reshape2::melt(d4,c("fibrosis","group"))
+d5$variable <- factor(d5$variable)
+d5 <- subset(d5,!is.na(d5$fibrosis))
+
+bplot <- ggplot()+
+  geom_point(data=d5,aes(x=variable,y=value,fill=group),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = 0.75),size=0.3)+
+  geom_boxplot(data=d5,aes(x=variable,y=value,fill=group),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust = 0.5),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.line = element_line(),
+    #panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "top")+
+  ylab("Log Transcripts Per Million")
+#ggsave("t_tests_fibrosis_0_rest_logTPM.tiff",plot = last_plot(),width = 4,height = 4)
+row1 <- ggarrange(t_nas,bplot,labels = "AUTO",ncol=2,widths = c(15,8))
+
+tnassig$gene <- rownames(tnassig)
+tnassig[4:6] <- NA
+tnassig <- tnassig[c(3,4,1,5,2,6)]
+colnames(tnassig) <- colnames(t1)
+tnassig$group <- "fibrosis 0 vs. rest T-test"
+
+table1 <- rbind(table1,tnassig)
+
+############# T-test 4 vs rest ###########################################
+
+d2 <- subset(d,d$fibrosis==4)
+d3 <- subset(d,d$fibrosis!=4)
+tnas <- data.frame()
+for(n in 1:length(c)){
+  x <- c[[n]]
+  xx <- t.test(d2[[x]],d3[[x]])
+  tnas[n,1] <- x
+  tnas[n,2] <- xx[["p.value"]]
+}
+tnas$V3 <- tnas$V2*nrow(tnas)
+tnassig <- subset(tnas,tnas$V3<0.05)
+tnassig <- tnassig[order(tnassig$V3),]
+row.names(tnassig) <- tnassig$V1
+tnassig <- tnassig[-c(1)]
+d4 <- subset(d,select=c("fibrosis",row.names(tnassig)))
+d4$group <- d4$fibrosis==4
+d4$group <- gsub(TRUE,"Fibrosis = 4",d4$group)
+d4$group <- gsub(FALSE,"Fibrosis \u2264 3",d4$group)
+
+d5 <- reshape2::melt(d4,c("fibrosis","group"))
+d5$variable <- factor(d5$variable)
+d5$group <- factor(d5$group,levels=c("Fibrosis \u2264 3","Fibrosis = 4"))
+d5 <- subset(d5,!is.na(d5$fibrosis))
+
+cplot <- ggplot()+
+  geom_point(data=d5,aes(x=variable,y=value,fill=group),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = 0.75),size=0.3)+
+  geom_boxplot(data=d5,aes(x=variable,y=value,fill=group),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust = 0.5),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.line = element_line(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "top")+
+  guides(fill=guide_legend(nrow = 2))+
+  ylab("Log Transcripts Per Million")
+cplot
+#ggsave("t_tests_fibrosis_4_rest_logTPM.tiff",plot = last_plot(),width=8,height=4)
+
+tnassig$gene <- rownames(tnassig)
+tnassig[4:6] <- NA
+tnassig <- tnassig[c(3,4,1,5,2,6)]
+colnames(tnassig) <- colnames(t1)
+tnassig$group <- "Fibrosis 4 vs. rest T-test"
+
+table1 <- rbind(table1,tnassig)
+
+############# T-test 0+1 vs rest ###########################################
+
+d2 <- subset(d,d$fibrosis<2)
+d3 <- subset(d,d$fibrosis>1 | is.na(d$fibrosis))
+tnas <- data.frame()
+for(n in 1:length(c)){
+  x <- c[[n]]
+  xx <- t.test(d2[[x]],d3[[x]])
+  tnas[n,1] <- x
+  tnas[n,2] <- xx[["p.value"]]
+}
+tnas$V3 <- tnas$V2*nrow(tnas)
+tnassig <- subset(tnas,tnas$V3<0.05)
+tnassig <- tnassig[order(tnassig$V3),]
+row.names(tnassig) <- tnassig$V1
+tnassig <- tnassig[-c(1)]
+d4 <- subset(d,select=c("fibrosis",row.names(tnassig)))
+d4$group <- d4$fibrosis<2
+d4$group <- gsub(TRUE,"Fibrosis \u2264 1",d4$group)
+d4$group <- gsub(FALSE,"Fibrosis \u2265 2",d4$group)
+
+d5 <- reshape2::melt(d4,c("fibrosis","group"))
+d5$variable <- factor(d5$variable)
+d5 <- subset(d5,!is.na(d5$fibrosis))
+
+dplot <- ggplot()+
+  geom_point(data=d5,aes(x=variable,y=value,fill=group),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = 0.75),size=0.3)+
+  geom_boxplot(data=d5,aes(x=variable,y=value,fill=group),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust = 0.5),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "top",
+    axis.line = element_line())+
+  ylab("Log Transcripts Per Million")
+#ggsave("t_tests_fibrosis_0and1_rest_logTPM.tiff",plot = last_plot(),width=8,height=4)
+
+tnassig$gene <- rownames(tnassig)
+tnassig[4:6] <- NA
+tnassig <- tnassig[c(3,4,1,5,2,6)]
+colnames(tnassig) <- colnames(t1)
+tnassig$group <- "Fibrosis 0+1 vs rest T-test"
+
+table1 <- rbind(table1,tnassig)
+
+################## Regressions for steatohepatitis ###################################
+
+p.gene.lm <- as.data.frame(row.names(b1))
+colnames(p.gene.lm) <- "gene"
+c <- row.names(b1)
+dd <- subset(d,!is.na(d$steatohep3))
+
+
+for(n in 1:nrow(p.gene.lm)){
+  x <- c[n]
+  d1 <- dd[c("steatohep3",x)]
+  colnames(d1) <- c("steatohep","RNA")
+  fit <- summary(lm(RNA~steatohep,data=d1))
+  p.gene.lm[n,2] <- x
+  p.gene.lm[n,3] <- fit$coefficients[2]
+  p.gene.lm[n,4] <- fit$coefficients[2,4]
+  p.gene.lm[n,5] <- fit$r.squared
+}
+p.gene.lm <- p.gene.lm[-c(1)]
+colnames(p.gene.lm) <- c("gene","slope","p_value","r_squared")
+p.gene.lm$p_value_bonferonni <- p.gene.lm$p_value*(length(c))
+p.gene.lm <- p.gene.lm[order(p.gene.lm$p_value_bonferonni),]
+row.names(p.gene.lm) <- NULL
+
+t3 <- subset(p.gene.lm, p.gene.lm[5]<=0.05)
+t3$group <- "Steatohepatitis Regression"
+table1 <- rbind(table1,t3)
+#write.table(p.gene.lm,"pharmacogene_steatohep_regression_results_logTPM.txt",row.names=FALSE)
+write.csv(p.gene.lm,"pharmacogene_steatohep_regression_results_logTPM.csv")
+
+############# Plot regressions ####################################################
+
+regr <- function(n){
+  x <- p.gene.lm$gene[n]
+  d1 <- dd[c("steatohep3",x)]
+  colnames(d1) <- c("steatohep","RNA")
+  fit <- summary(lm(RNA~steatohep,data=d1))
+  ggplot()+geom_point(data=d1,aes(y=RNA,x=steatohep))+
+    geom_smooth(data=d1,aes(y=RNA,x=steatohep),method=lm)+
+    ylab(paste0(x))+
+    #xlab(paste0("steatohep","\nR-squared: ",round(fit$r.squared,2)))+
+    xlab(NULL)+
+    theme(text = element_text(size=10),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          panel.background=element_blank(),
+          axis.line=element_line(colour="black")
+          )+scale_x_continuous(breaks=c(0,1,2))
+}
+
+list <- list()
+psig <- subset(p.gene.lm,p.gene.lm$p_value_bonferonni<0.05)
+for(n in 1:nrow(psig)){
+  A <- regr(n)
+  list[[n]] <- A 
+}
+
+write.csv(psig,"steatohep_hits_regression.csv")
+
+row1 <- ggarrange(plotlist = list,nrow=1)
+row1 <- annotate_figure(row1, top = textGrob(" "), bottom = textGrob("Steatohepatitis (0-2)", gp = gpar(cex = 1)),fill_palette(NULL))
+
+#ggsave("regression_plots_steatohep_logTPM.tiff",plot = last_plot(),width = 6,height=6)
+
+############# S-plot #############################################
+
+p.gene.lm$label <- p.gene.lm$gene
+p.gene.lm$BH <- p.adjust(p.gene.lm$p_value,method = "BH")
+BHlim <- max(subset(p.gene.lm,p.gene.lm$BH<.05)$p_value_bonferonni)
+
+row2 <- ggplot()+geom_point(data=p.gene.lm,
+                    mapping=aes(y=p_value_bonferonni,x=reorder(gene,p_value_bonferonni),
+                                color=slope),alpha=0.8,size=1.5)+
+  scale_color_gradientn(colours=c("firebrick","goldenrod","dodgerblue")
+                        #limits=c(0,0.05),
+                        #breaks=c(0,0.025,0.05),
+                        #na.value="grey"
+  )+
+  geom_hline(yintercept = 0.05,
+             linetype="dashed",
+             color="black")+
+  geom_hline(yintercept = BHlim,
+             linetype="dashed",
+             color="grey50")+
+  geom_hline(yintercept = .05*length(c),
+             linetype="dashed",
+             color="grey80")+
+  theme(axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(size=0.5),
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_text(size=8),
+        legend.text = element_text(size=8),
+        axis.title = element_text(size=10))+
+  #scale_y_continuous(breaks = seq(-7,7,by=2))+
+  #ggtitle("Steatohepatitis")+
+  xlab("Gene")+ylab("Bonferroni Corrected\nP-value")+
+  geom_label_repel(data=subset(p.gene.lm, p.gene.lm$p_value_bonferonni<0.05 |
+                                 p.gene.lm$gene=="CYP1A2" |
+                                 p.gene.lm$gene=="CYP3A4" |
+                                 p.gene.lm$gene=="CYP2E1" |
+                                 p.gene.lm$gene=="CYP2C19" |
+                                 p.gene.lm$gene=="CYP2D6" |
+                                 p.gene.lm$gene=="CYP2B6" |
+                                 p.gene.lm$gene=="CYP2C9" |
+                                 p.gene.lm$gene=="CYP3A5" |
+                                 p.gene.lm$gene=="CYP2C8"
+  ),
+  aes(y=p_value_bonferonni,x=gene,label=gene),
+  nudge_x = 50,
+  size=3,
+  nudge_y = -1.5,
+  max.overlaps = 20,
+  #box.padding = 0.3,
+  #point.padding = 0.5,
+  #force = 200
+  min.segment.length = 0)+
+  scale_y_log10()+
+  geom_text(aes(200,0.03,
+                label="BONFERRONI SIGNIFICANCE THRESHOLD"),
+            size=2.5)+
+  geom_text(aes(2,BHlim+2,
+                label="BH THRESHOLD"),
+            color="grey50",size=2.5,hjust=0)+
+  geom_text(aes(2,(.05*length(c))+10,
+                label="UNADJUSTED ALPHA"),
+            color="grey80",size=2.5,hjust=0)
+
+fig4 <- ggarrange(row1,row2,nrow=2,labels = "AUTO",heights = c(3,5))
+ggsave("Figure4.tiff",plot = fig4,width = 8,height = 4,bg="white")
+
+############# volcano #############
+
+BHlim <- max(subset(p.gene.lm,p.gene.lm$BH<.05)$p_value)
+sth_volc <- ggplot()+geom_point(data=p.gene.lm,
+                                mapping=aes(y=-log10(p_value),x=slope,
+                                            color=-log10(p_value)),
+                                alpha=0.8,
+                                size=3)+
+  scale_color_continuous(limits=c(-log10(BHlim),10))+
+  geom_hline(yintercept = -log10(0.05),
+             linetype="dashed",
+             color="grey80")+
+  geom_hline(yintercept = -log10(BHlim),
+             linetype="dashed",
+             color="grey50")+
+  geom_hline(yintercept = -log10(.05/length(c)),
+             linetype="dashed",
+             color="black")+
+  geom_text(aes(min(p.gene.lm$slope),-log10(.05/length(c))+.15,
+                label="BONFERRONI SIGNIFICANCE THRESHOLD"),
+            size=2.5,hjust=0)+
+  geom_text(aes(min(p.gene.lm$slope),-log10(BHlim)+.15,
+                label="BH THRESHOLD"),
+            color="grey50",size=2.5,hjust=0)+
+  geom_text(aes(min(p.gene.lm$slope),-log10(0.05)+.15,
+                label="UNADJUSTED ALPHA"),
+            color="grey80",size=2.5,hjust=0)+
+  theme(panel.background = element_blank(),
+        axis.line = element_line(size=0.5),
+        legend.position = "none"
+  )+
+  scale_y_continuous(expand = c(.02,0),limits = c(0,9))+
+  scale_x_continuous(expand = c(.05,0))+
+  #ggtitle("NAFLD Activity Score")+
+  xlab("Slope")+ylab("-Log10 P-value")+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni<.05 & slope<0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = -.1,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 2,
+                   max.overlaps = 20,
+                   box.padding = .4,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni<.05 & slope>0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(0,.4),
+                   #ylim = c(6,9),
+                   nudge_x = .10,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = 2,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni>.05 & BH<.05 & slope<0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(min(p.gene.lm$slope),0),
+                   #ylim = c(4,7),
+                   nudge_x = -.15,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = -.5,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(p_value_bonferonni>.05 & BH<.05 & slope>0,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = .15,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   #nudge_y = 1,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(BH>.05 & slope<0 & gene %in%
+                                                               c("CYP1A2","CYP3A4","CYP2E1","CYP2C19",
+                                                                 "CYP2D6","CYP2B6","CYP2C9","CYP3A5","CYP2C8")
+                                                             ,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   ylim = c(0,1.2),
+                   nudge_x = -.20,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   #nudge_y = -1.2,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)+
+  geom_label_repel(data= p.gene.lm %>% mutate(label = ifelse(BH>.05 & slope>0 & gene %in%
+                                                               c("CYP1A2","CYP3A4","CYP2E1","CYP2C19",
+                                                                 "CYP2D6","CYP2B6","CYP2C9","CYP3A5","CYP2C8")
+                                                             ,gene,"")),
+                   aes(y=-log10(p_value),x=slope,label=label),
+                   #xlim = c(.2,.4),
+                   #ylim = c(7,10),
+                   nudge_x = .25,
+                   size=2.5,
+                   #color="black",
+                   segment.color = "grey80",
+                   nudge_y = -.75,
+                   max.overlaps = 20,
+                   #box.padding = 1,
+                   #point.padding = 0.5,
+                   #force_pull = 2,
+                   #force = 200,
+                   min.segment.length = 0)
+
+sth_volc
+
+ggsave("Supp_Figure3.tiff",plot = sth_volc,width = 8,height = 6,bg = "white")
+
+plot1 <- ggarrange(row1,sth_volc,
+                   nrow = 2,
+                   ncol = 1,
+                   labels = "AUTO",
+                   heights = c(2, 6) 
+)
+#plot1
+ggsave("Figure4_alt.tiff",plot = plot1,width = 8,height = 6,bg = "white")
+
+############# T-test 2 vs rest ###########################################
+d2 <- subset(d,d$steatohep3==2)
+d3 <- subset(d,d$steatohep3!=2)
+tnas <- data.frame()
+for(n in 1:length(c)){
+  x <- c[[n]]
+  xx <- t.test(d2[[x]],d3[[x]])
+  tnas[n,1] <- x
+  tnas[n,2] <- xx[["p.value"]]
+}
+tnas$V3 <- tnas$V2*nrow(tnas)
+tnassig <- subset(tnas,tnas$V3<0.05)
+tnassig <- tnassig[order(tnassig$V3),]
+row.names(tnassig) <- tnassig$V1
+tnassig <- tnassig[-c(1)]
+d4 <- subset(d,select=c("steatohep3",row.names(tnassig)))
+d4$group <- d4$steatohep==2
+d4$group <- gsub(TRUE,"Steatohep = 2",d4$group)
+d4$group <- gsub(FALSE,"Steatohep \u2264 1",d4$group)
+
+d5 <- reshape2::melt(d4,c("steatohep3","group"))
+d5$variable <- factor(d5$variable)
+d5$group <- factor(d5$group,levels=c("Steatohep \u2264 1","Steatohep = 2"))
+d5 <- subset(d5,!is.na(d5$steatohep3))
+
+eplot <- ggplot()+
+  geom_point(data=d5,aes(x=variable,y=value,fill=group),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = 0.75),size=0.3)+
+  geom_boxplot(data=d5,aes(x=variable,y=value,fill=group),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust=0.5),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "top",
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank())+
+  ylab("Log Transcripts Per Million")
+
+row2 <- ggarrange(cplot,dplot,eplot,labels = c("C","D","E"),ncol=3,widths = c(2,3,2.5))
+ggarrange(row1,row2,nrow=2)
+
+ggsave("Figure2.tiff",plot = last_plot(),width = 8,height=8)
+
+tnassig$gene <- rownames(tnassig)
+tnassig[4:6] <- NA
+tnassig <- tnassig[c(3,4,1,5,2,6)]
+colnames(tnassig) <- colnames(t1)
+tnassig$group <- "Steatohepatitis 2 vs rest T-test"
+
+table1 <- rbind(table1,tnassig)
+write.csv(table1,file="table1.csv")
+############# between variables ######################
+
+c1 <- read.csv("directory/Nick's Analyses/c.csv", row.names=1)
+c1$steatohep[c1$steatohep==1] <- 0
+c1$steatohep[c1$steatohep==2] <- 1
+c1$steatohep[c1$steatohep==3] <- 1
+c1$steatohep[c1$steatohep==4] <- 2
+
+fit1 <- summary(lm(fibrosis~nas,data = c1))
+fit2 <- summary(lm(fibrosis~steatohep,data = c1))
+fit3 <- summary(lm(steatohep~nas,data = c1))
+
+A <- ggplot()+geom_point(data=c1,aes(y=steatohep,x=nas),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=steatohep,x=nas),method=lm)+
+  ylab("Steatohepatitis")+
+  xlab(paste0("NAS","\nR-squared: ",round(fit3$r.squared,2),"\np-value ",formatC(fit3$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+B <- ggplot()+geom_point(data=c1,aes(y=fibrosis,x=nas),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=fibrosis,x=nas),method=lm)+
+  ylab("Fibrosis")+
+  xlab(paste0("NAS","\nR-squared: ",round(fit1$r.squared,2),"\np-value ",formatC(fit1$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+C <- ggplot()+geom_point(data=c1,aes(y=fibrosis,x=steatohep),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=fibrosis,x=steatohep),method=lm)+
+  ylab("Fibrosis")+
+  xlab(paste0("Steatohepatitis","\nR-squared: ",round(fit2$r.squared,2),"\np-value ",formatC(fit2$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+fit4 <- summary(lm(age~nas,data = c1))
+fit5 <- summary(lm(age~fibrosis,data = c1))
+fit6 <- summary(lm(age~steatohep,data = c1))
+
+D <- ggplot()+geom_point(data=c1,aes(y=age,x=nas),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=age,x=nas),method=lm)+
+  ylab("Age")+
+  xlab(paste0("NAS","\nR-squared: ",round(fit4$r.squared,2),"\np-value ",round(fit4$coefficients[2,4],2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+E <- ggplot()+geom_point(data=c1,aes(y=age,x=fibrosis),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=age,x=fibrosis),method=lm)+
+  ylab("Age")+
+  xlab(paste0("Fibrosis","\nR-squared: ",round(fit5$r.squared,2),"\np-value ",round(fit5$coefficients[2,4],2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+F <- ggplot()+geom_point(data=c1,aes(y=age,x=steatohep),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=age,x=steatohep),method=lm)+
+  ylab("Age")+
+  xlab(paste0("Steatohepatitis","\nR-squared: ",round(fit6$r.squared,2),"\np-value ",round(fit6$coefficients[2,4],2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+fit7 <- summary(lm(bmi~nas,data = c1))
+fit8 <- summary(lm(bmi~fibrosis,data = c1))
+fit9 <- summary(lm(bmi~steatohep,data = c1))
+
+G <- ggplot()+geom_point(data=c1,aes(y=bmi,x=nas),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=bmi,x=nas),method=lm)+
+  ylab("BMI")+
+  xlab(paste0("NAS","\nR-squared: ",round(fit7$r.squared,2),"\np-value ",formatC(fit7$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+H <- ggplot()+geom_point(data=c1,aes(y=bmi,x=fibrosis),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=bmi,x=fibrosis),method=lm)+
+  ylab("BMI")+
+  xlab(paste0("Fibrosis","\nR-squared: ",round(fit8$r.squared,2),"\np-value ",formatC(fit8$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+I <- ggplot()+geom_point(data=c1,aes(y=bmi,x=steatohep),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=c1,aes(y=bmi,x=steatohep),method=lm)+
+  ylab("BMI")+
+  xlab(paste0("Steatohepatitis","\nR-squared: ",round(fit9$r.squared,2),"\np-value ",formatC(fit9$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+ggarrange(A,B,C,D,E,F,G,H,I,labels = "AUTO")
+ggsave("disease_comparisons_wcov.tiff",plot = last_plot(),width = 6,height = 6)
+
+  ########## meta analysis ################
+meta_analysis <- read_excel("meta-analysis.xlsx")
+meta_analysis[,4:5] <- str_split_fixed(meta_analysis$gene," ",2)
+vec <- unique(meta_analysis$V1)
+vec_df <- as.data.frame(vec)
+for(n in 1:nrow(vec_df)){
+  x <- subset(meta_analysis,meta_analysis$V1==vec_df[n,1])
+  y <- unique(x$gene)
+  xx <- as.data.frame(table(x$V2))[order(as.data.frame(table(x$V2))$Freq,decreasing = T),]
+  if(length(y)==1){
+    vec_df[n,2] <- nrow(x)
+    vec_df[n,3] <- x[1,1]
+  }
+  if(length(y)==2){
+    vec_df[n,2] <- nrow(x)-2
+    vec_df[n,3] <- paste0(x[1,1]," ",xx[1,4])
+  }
+}
+vec_df <- subset(vec_df,vec_df$V2>0)
+write.csv(vec_df,"comparison_stats_together.csv")
+#ggplot(data=subset(vec_df,vec_df$V2>2),aes(x=reorder(gene,-V2),y=V2))+geom_col()
+
+### compare with our data
+meta_analysis <- read_excel("meta-analysis.xlsx")
+meta_analysis[,4:5] <- str_split_fixed(meta_analysis$gene," ",2)
+meta_analysis_sub <- subset(meta_analysis,meta_analysis$`agree with us`=="yes" | meta_analysis$`agree with us`=="no")
+meta_analysis_sub <- meta_analysis_sub[c(1:3)]
+meta_analysis_sub <- distinct(meta_analysis_sub)
+meta_analysis_sub <- meta_analysis_sub[order(meta_analysis_sub$`number of studies`,decreasing = T),]
+write.csv(meta_analysis_sub,"comparison_stats.csv")
+
+
+#################### skewness #############################
+
+bskew <- data.frame(gene = colnames(b), skew = NA)
+for(n in 1:nrow(bskew)){
+  bskew[n,2] <- skewness(b[,bskew[n,1]])
+}
+
+bskew1 <- merge(g,bskew,by="gene",all = T)
+
+a <- ggplot()+geom_density(data = bskew1,aes(x=skew,fill=group),alpha=0.5)+ggtitle("Gene Expression Skewness")+
+  scale_x_continuous(limits = c(-3,2))+guides(fill=guide_legend("Associated \nWith"))
+a
+
+askew <- data.frame(gene = colnames(a2), skew = NA)
+for(n in 1:nrow(askew)){
+  askew[n,2] <- skewness(a2[,askew[n,1]])
+}
+colnames(askew) <- c("mir","skew")
+
+jmir <- as.data.frame(unique(data.frame(j$mir,j$gene)))
+colnames(jmir) <- c("mir","gene")
+
+askew1 <- merge(askew,jmir,by="mir",all=T)
+
+b <- ggplot()+geom_density(data = askew1,aes(x=skew,fill=gene),alpha=0.5)+ggtitle("MicroRNA Expression Skewness")+
+  scale_x_continuous(limits = c(-2,2))+guides(fill=guide_legend("Associated \nWith"))
+b
+
+phenotypes_pruned <- read.csv("directory/phenotypes_pruned.csv")
+phenotypes_pruned <- phenotypes_pruned[c(5,6,11)]
+colnames(phenotypes_pruned) <- c("NAS","Fibrosis","Steatohep")
+melt <- reshape2::melt(phenotypes_pruned)
+
+c <- ggplot()+geom_density(data = melt,aes(x=value,fill=variable),alpha=0.5)+ggtitle("Phenotype Distribution")+
+  scale_x_continuous(limits = c(-1,10))+guides(fill=guide_legend("Phenotype"))
+c
+
+ggarrange(a,b,c,labels="AUTO")
+
+ggsave(plot = last_plot(),filename = "distributions.tiff",device = "tiff",width = 10,height = 10)
+
+########## absolute CYP2c19 expression change #############
+
+reads <- read.csv("directory/Nick's Analyses/data frame ouputs/NASH_RNAseq_data_TPM_norm.txt", sep="", stringsAsFactors=FALSE)
+reads1 <- subset(reads, reads$Gene=="CYP2C19")
+row.names(reads1) <- reads1$Gene
+reads1 <- reads1[-c(1)]
+reads1 <- as.data.frame(t(reads1))
+
+phen <- d[c(1,5,6,11)]
+row.names(phen) <- phen$Row.names
+phen <- phen[-c(1)]
+
+q <- merge(phen,reads1,by=0)
+row.names(q) <- q$Row.names
+q <- q[-c(1)]
+
+fit1 <- summary(lm(nas~CYP2C19,data = q))
+fit2 <- summary(lm(fibrosis~CYP2C19,data = q))
+fit3 <- summary(lm(steatohep3~CYP2C19,data = q))
+
+A <- ggplot()+geom_point(data=q,aes(y=CYP2C19,x=nas),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=q,aes(y=CYP2C19,x=nas),method=lm)+
+  ylab("CYP2C19")+
+  xlab(paste0("NAS","\nR-squared: ",round(fit1$r.squared,2),"\np-value ",formatC(fit1$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+B <- ggplot()+geom_point(data=q,aes(y=CYP2C19,x=fibrosis),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=q,aes(y=CYP2C19,x=fibrosis),method=lm)+
+  ylab("CYP2C19")+
+  xlab(paste0("Fibrosis","\nR-squared: ",round(fit2$r.squared,2),"\np-value ",formatC(fit2$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+C <- ggplot()+geom_point(data=q,aes(y=CYP2C19,x=steatohep3),position = position_jitter(width=0.1,height = 0.1))+
+  geom_smooth(data=q,aes(y=CYP2C19,x=steatohep3),method=lm)+
+  ylab("CYP2C19")+
+  xlab(paste0("Steatohepatitis","\nR-squared: ",round(fit3$r.squared,2),"\np-value ",formatC(fit3$coefficients[2,4],format="e",digits=2)))+
+  theme(text = element_text(size=8),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.background=element_blank(),
+        axis.line=element_line(colour="black"))
+
+ggarrange(A,B,C,labels = "AUTO")
+ggsave(plot = last_plot(),filename = "CYP2C19_absolute.tiff",device = "tiff",width = 5,height = 5)
+
+
+############# venn diagram ################
+
+library(UpSetR)
+z1 <- read.csv("directory/pharmacogene_fibrosis_regression_results_logTPM.csv", row.names=1)
+z2 <- read.csv("directory/pharmacogene_NAS_regression_results_logTPM.csv", row.names=1)
+z3 <- read.csv("directory/pharmacogene_steatohep_regression_results_logTPM.csv", row.names=1)
+z1$group <- "fibrosis"
+z1$fibBH <- p.adjust(z1$p_value,method = "BH")
+z1sub <- subset(z1,z1$fibBH<0.05)
+colnames(z1sub)[2] <- "FIBslope"
+z2$group <- "NAS"
+z2$nasBH <- p.adjust(z2$p_value,method = "BH")
+z2sub <- subset(z2,z2$nasBH<0.05)
+colnames(z2sub)[2] <- "NASslope"
+z3$group <- "steatohep"
+z3$steatBH <- p.adjust(z3$p_value,method = "BH")
+z3sub <- subset(z3,z3$steatBH<0.05)
+colnames(z3sub)[2] <- "STHslope"
+
+zmerge <- merge(z1sub[c(1,7)],z2sub[c(1,7)],by="gene",all=T)
+zmerge <- merge(zmerge,z3sub[c(1,7)],by="gene",all=T)
+
+zmerge[is.na(zmerge)] <- 0
+zmerge$fibBH[zmerge$fibBH>0] <- 1
+zmerge$nasBH[zmerge$nasBH>0] <- 1
+zmerge$steatBH[zmerge$steatBH>0] <- 1
+
+row.names(zmerge) <- zmerge$gene
+zmerge <- zmerge[-c(1)]
+
+colnames(zmerge) <- c("FIB","NAS","STH")
+pdf(file="upset.pdf", width = 5,height = 5)
+upset(zmerge,
+      order.by = "degree",
+      nintersects=4,
+      sets.x.label = "Pharmacogenes",
+      mainbar.y.label = "Pharmacogene\nIntersections",
+      mb.ratio = c(0.7,0.3),
+      text.scale = c(2, 1.5, 1.5, 1.5, 2, 2),
+      line.size = 1.2,
+      point.size = 5)
+dev.off()
+
+zmerge1 <- merge(z1sub[c(1,2,7)],z2sub[c(1,2,7)],by="gene",all=T)
+zmerge1 <- merge(zmerge1,z3sub[c(1,2,7)],by="gene",all=T)
+zmerge1 <- na.omit(zmerge1)
+
+for(n in 1:nrow(zmerge1)){
+  zmerge1[n,8] <- mean(c(zmerge1[n,3],zmerge1[n,5],zmerge1[n,7]))
+}
+colnames(zmerge1)[8] <- "pAVG"
+zmerge1$FIB_FC <- exp(1)^zmerge1$FIBslope
+zmerge1$NAS_FC <- exp(1)^zmerge1$NASslope
+zmerge1$STH_FC <- exp(1)^zmerge1$STHslope
+
+zmerge2 <- zmerge1[c(1,9,10,11)]
+colnames(zmerge2) <- c("gene","FIB","NAS","STH")
+df <- reshape2::melt(zmerge2)
+colnames(df) <- c("gene","Group","fold_change")
+
+zmerge3 <- zmerge1[c(1,3,5,7)]
+colnames(zmerge3) <- c("gene","FIB","NAS","STH")
+df2 <- reshape2::melt(zmerge3)
+colnames(df2) <- c("gene","Group","BH p-value")
+df3 <- merge(df,df2,by=c("gene","Group"))
+df3$`p-value (BH)` <- log10(1/df3$`BH p-value`)
+df3$Group <- as.factor(df3$Group)
+df3$Group <- factor(df3$Group,levels=c("NAS","FIB","STH"))
+df3 <- df3[order(df3$`BH p-value`,decreasing = F),]
+row.names(df3) <- NULL
+
+ggplot()+geom_point(data = df3,aes(x=reorder(gene,fold_change),y=fold_change,shape=Group,size=`p-value (BH)`,fill=Group))+
+  theme_minimal()+
+  theme(axis.text = element_text(size=10),
+        axis.text.x = element_text(angle=90,vjust=0.5,face = "bold",color = "black"),
+        legend.key.size = unit(4,"mm"),
+        axis.line = element_line()
+        )+
+  ylab("mRNA Percent Change per Disease Unit")+
+  xlab(NULL)+
+  scale_shape_manual(values=c(21,22,23))+
+  scale_fill_manual(values=c("firebrick","darkslategrey","goldenrod4"))+
+  scale_size_continuous(breaks=c(2,3,4,5),labels = c(">0.01","0.001","0.0001","<0.00001"),range = c(0,7))+
+  guides(shape = guide_legend(override.aes = list(size = 5)))
+
+ggsave("BH percent change.tiff",plot=last_plot(),height=4,width=5,bg="white")
+write.csv(zmerge1,"BH_table.csv")
+
+####### FOREST PLOTS and META Anlaysis ##############
+
+library(meta)
+library(metafor)
+library(tidyverse)
+library(ggplot2)
+library(dmetar)
+setwd("directory/meta")
+forest <- read.csv("directory/meta/forest2.csv", stringsAsFactors=FALSE)
+
+# bmj "how to convert pvalue to CI"
+forest$z <- (-.862)+sqrt(.743-(2.404*log(forest$P.val)))
+forest$SE <- abs(forest$Log_FC/forest$z)
+forest$lowerCI <- forest$Log_FC-(1.96*forest$SE)
+forest$upperCI <- forest$Log_FC+(1.96*forest$SE)
+forest$Comparison <- gsub("Severe NAFLD vs.","Severe NAFLD vs.\n",forest$Comparison)
+forest$Comparison <- gsub("High steatosis vs.","High steatosis vs.\n",forest$Comparison)
+forest$lab <- paste0(forest$Author,"    N=",forest$N)
+forest$Comparison <- gsub("F3-4 vs. F0-1","Fibrosis 3-4 vs. 0-1",forest$Comparison)
+forest$Comparison <- gsub("steatosis vs. control","Steatosis vs. control",forest$Comparison)
+forest$Comparison <- gsub("NAS 5-8 vs. NAS 0-4","NAFLD Activity Score\n5-8 vs. 0-4",forest$Comparison)
+forest$Comparison <- gsub("control","Control",forest$Comparison)
+forest$Comparison <- gsub("mild-no","Mild-No",forest$Comparison)
+forest$Comparison <- gsub("steatosis","Steatosis",forest$Comparison)
+forest$Comparison <- gsub("low-no","Low-No",forest$Comparison)
+
+############# ggplot ##################
+
+forest2 <- subset(forest,forest$Comparison=="Fibrosis 3-4 vs. 0-1" |
+                    forest$Comparison=="High Steatosis vs.\n Low-No Steatosis" |
+                    forest$Comparison=="NAFLD Activity Score\n5-8 vs. 0-4" |
+                    forest$Comparison=="NASH vs. Control" |
+                    forest$Comparison=="Severe NAFLD vs.\n Mild-No NAFLD" |
+                    forest$Comparison=="Steatosis vs. Control" |
+                    forest$Comparison=="NASH vs. Steatosis" |
+                    forest$Comparison=="NAFLD vs. Control" |
+                    forest$Comparison=="NASH vs. Control-Steatosis"|
+                    forest$Comparison=="NASH vs. NAFL")
+
+forest2$Comparison <- gsub("NASH vs. NAFL","NASH vs. Steatosis",forest2$Comparison)
+
+forest2$Comparison <- as.factor(forest2$Comparison)
+forest2$Comparison <- ordered(forest2$Comparison,levels=c("Fibrosis 3-4 vs. 0-1",
+                                "Severe NAFLD vs.\n Mild-No NAFLD",
+                                "NAFLD vs. Control",
+                                "NAFLD Activity Score\n5-8 vs. 0-4",
+                                "NASH vs. Control",
+                                "NASH vs. Control-Steatosis",
+                                "NASH vs. Steatosis",
+                                "Steatosis vs. Control",
+                                "High Steatosis vs.\n Low-No Steatosis"))
+                    
+ggplot()+
+  geom_point(data=forest2,mapping=aes(x=Log_FC,y=lab))+
+  geom_errorbar(data=forest2,mapping=aes(y=lab,x=Log_FC,xmin=lowerCI,xmax=upperCI))+
+  theme(
+    panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+      #  panel.background=element_blank(),
+       # axis.line=element_line(colour="black"),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.title=element_text(size=12),
+        axis.text.x=element_text(size=12),
+        axis.text.y=element_text(size=8),
+        strip.text.y.right=element_text(angle=0,size=10))+
+  ylab(NULL)+
+  xlab("Log2 Fold Change")+
+  ggtitle("CYP2C19 Differential Expression in NAFLD and NASH")+
+  geom_vline(xintercept = 0,linetype="dashed",color="firebrick",size=.6,alpha=0.85)+
+  scale_y_discrete(expand = c(0,1))+
+  scale_x_continuous(breaks=seq(from=-5,to=5,by=1),limits = c(-5,5),expand = c(0,0))+
+  facet_grid(Comparison~.,scales="free_y",space="free_y")
+
+ggsave(plot = last_plot(),filename = "Supp_meta.tiff",width = 7,height = 7)
+
+################ using the meta package ######################
+
+##Fibrosis 3-4 vs. 0-1
+forest1 <- subset(forest,forest$Comparison=="Fibrosis 3-4 vs. 0-1")
+forest11 <- forest1[c(1,2,3,6,9,10)]
+forest1$N_weight <- (forest1$N)*forest1$Log_FC
+n_weight <- sum(forest1$N_weight)/sum(forest1$N)
+m.gen <- metagen(TE=Log_FC, 
+                 #seTE=SE,
+                 pval = P.val,
+                 studlab=Author,
+                 data=forest1,
+                 sm="SMD",
+                 #method.sd = "Wan",
+                 #n.e = N,
+                 #w.random=weights,
+                 method.tau = "REML",
+                 detail.tau = TRUE,
+                 fixed = FALSE,
+                 random = TRUE,
+                 #hakn = FALSE,
+                 prediction = FALSE,
+                 title = "CYP2C19 DIfferential Expression in NAFLD and NASH")
+
+summary(m.gen)
+
+pdf(file="fibrosis_forest.pdf", width = 8,height = 3.9)
+forest.meta(m.gen, 
+            sortvar = TE,
+            predict = FALSE, 
+            print.tau2 = TRUE,
+            leftcols = c("studlab","Year","Tech","N"),
+            leftlabs = c("Author","Year","Tech","N"),
+            rightcols = c("effect", "ci","w.random"),
+            rightlabs = c("Value","95% CI","Weight"),
+            xlab = "Log2 Fold Change",
+            smlab="Fibrosis 3-4 vs. 0-1\nCYP2C19 mRNA Expression",
+            hetstat = FALSE,
+            colgap="5mm",
+            colgap.studlab="-22mm",
+            text.random = "Random Effects Model Estimate",
+            #comb.random=TRUE,
+            calcwidth.random=F,
+            just="left",
+            just.addcols="left",
+            #label.right = "increased",
+            #backtransf = TRUE,
+            plotwidth="55mm",
+            text.addline1 = paste0("Sample size-weighted effect = ",round(n_weight,digits = 2))
+            #calcwidth.addline=F
+            )
+dev.off()
+
+### NASH vs. Control
+forest2 <- subset(forest,forest$Comparison=="NASH vs. Control")
+forest3 <- forest[52,]
+forest3$Author <- paste0(forest3$Author,"*")
+forest2 <- rbind(forest3,forest2)
+forest2$N_weight <- (forest2$N)*forest2$Log_FC
+n_weight <- sum(forest2$N_weight)/sum(forest2$N)
+m.gen2 <- metagen(TE=Log_FC, 
+                 #seTE=SE,
+                 pval = P.val,
+                 studlab=Author,
+                 data=forest2,
+                 sm="SMD",
+                 method.tau = "REML",
+                 fixed = FALSE,
+                 hakn = TRUE,
+                 prediction = FALSE,
+                 title = "CYP2C19 DIfferential Expression in NAFLD and NASH")
+
+
+pdf(file="NASH_forest.pdf", width = 8,height = 4.7)
+forest.meta(m.gen2,
+           sortvar = TE,
+           predict = FALSE, 
+           print.tau2 = FALSE,
+           leftcols = c("studlab","Year","Tech","N"),
+           leftlabs = c("Author","Year","Tech","N"),
+           rightcols = c("effect", "ci","w.random"),
+           rightlabs = c("Value","95% CI","Weight"),
+           xlab = "Log2 Fold Change",
+           smlab="NASH vs. Control\nCYP2C19 mRNA Expression",
+           hetstat = FALSE,
+           colgap="5mm",
+           colgap.studlab="-22mm",
+           text.random = "Random Effects Model Estimate",
+           #comb.random=TRUE,
+           calcwidth.random=F,
+           just="left",
+           just.addcols="left",
+           #label.right = "increased",
+           #backtransf = TRUE
+           plotwidth="55mm",
+           text.addline1 = paste0("Sample size-weighted effect = ",round(n_weight,digits = 2))
+)
+dev.off()
+
+### NAFLD vs. control
+forest4 <- subset(forest,forest$Comparison==forest[4,6])
+forest3 <- forest[27,]
+forest5 <- forest[c(42,32,24),]
+forest3 <- rbind(forest3,forest5)
+forest3$Author <- paste0(forest3$Author,"*")
+forest5 <- rbind(forest4,forest3)
+
+forest5$N_weight <- (forest5$N)*forest5$Log_FC
+n_weight <- sum(forest5$N_weight)/sum(forest5$N)
+
+m.gen3 <- metagen(TE=Log_FC, 
+                  #seTE=SE,
+                  pval = P.val,
+                  studlab=Author,
+                  data=forest5,
+                  sm="SMD",
+                  method.tau = "REML",
+                  fixed = FALSE,
+                  hakn = TRUE,
+                  prediction = FALSE,
+                  title = "CYP2C19 DIfferential Expression in NAFLD and NASH")
+
+pdf(file="NAFLD_forest.pdf", width = 8,height = 4.5)
+forest.meta(m.gen3,
+            sortvar = TE,
+            predict = FALSE, 
+            print.tau2 = FALSE,
+            leftcols = c("studlab","Year","Tech","N"),
+            leftlabs = c("Author","Year","Tech","N"),
+            rightcols = c("effect", "ci","w.random"),
+            rightlabs = c("Value","95% CI","Weight"),
+            xlab = "Log2 Fold Change",
+            smlab="NAFLD Activity Score 5-8 vs. 0-4\nCYP2C19 mRNA Expression",
+            hetstat = FALSE,
+            colgap="5mm",
+            colgap.studlab="-22mm",
+            text.random = "Random Effects Model Estimate",
+            #comb.random=TRUE,
+            calcwidth.random=F,
+            just="left",
+            just.addcols="left",
+            #label.right = "increased",
+            #backtransf = TRUE
+            plotwidth="55mm",
+            text.addline1 = paste0("Sample size-weighted effect = ",round(n_weight,digits = 2))
+)
+dev.off()
+help(metagen)
+
+
+########################## script for response to reviewers ######################################
+setwd("directory/NASH")
+library(dplyr)
+library(ggplot2)
+
+phen <- read_excel("Nick's Analyses/Lilly Biopsy Phenotype_nicks_copy.xlsx", sheet = "Include pass RQI>6", n_max = 200)
+phen2 <- read_excel("Nick's Analyses/Lilly Biopsy Phenotype_nicks_copy.xlsx", sheet = "MolecularPathwaysInv_DATA_2016-", skip = 4, n_max = 200)
+key <- read.delim("directory/NASH/NASH_RNAseq_data_sample_list.txt")
+colnames(key) <- c("reads_ID","Study ID")
+
+phen <- phen[-c(6:18)]
+phen <- phen[-c(129:130),]
+phen <- merge(key,phen, by="Study ID")
+
+phen <- merge(phen, phen2, by="Study ID")
+
+phen <- phen[!duplicated(as.list(phen))]
+rm(phen2)
+
+demo <- phen[c(1,2,4,5,6,8,9,47,48,49,50,61:95)]
+demo <- demo[,order(colnames(demo))]
+demo <- demo[c(39,36,2:35,37:38,40:46)]
+write.table(demo, file="directory/not for submission/demographics_raw.csv",row.names = F,col.names = T, sep = ",")
+
+histology <- phen[c(1,2,10:46,59:60)]
+write.table(histology, file="directory/not for submission/histology_raw.csv",row.names = F,col.names = T, sep = ",")
+
+### went into excel and manually curated the demographics_raw.csv into several new data frames
+
+demographics <- read.csv("directory/not for submission/demographics.csv")
+labs <- read.csv("directory/not for submission/labs.csv")
+conditions <- read.csv("directory/not for submission/conditions.csv")
+drugs <- read.csv("directory/not for submission/drugs.csv")
+histology <- read.csv("directory/not for submission/histology.csv")
+
+total <- merge(demographics[-c(1)], histology[-c(1)], by="reads_ID")
+total <- merge(total, conditions[-c(1)], by="reads_ID")
+total <- merge(total, drugs[-c(1)], by="reads_ID")
+total <- merge(total, labs[-c(1)], by="reads_ID")
+
+rm(demographics, labs, conditions,drugs, histology)
+
+###code for filling out excel table of demographics ####
+
+total %>% group_by(CRN_dx_score) %>% summarise(n=n())
+total %>% group_by(fibrosis_stage) %>% summarise(n=n())
+total %>% group_by(NAS) %>% summarise(n=n())
+
+total %>% count(Sex)
+total %>% count(CRN_dx_score,Sex)
+total %>% count(NAS,Sex)
+total %>% count(fibrosis_stage,Sex)
+
+total %>% count(Race)
+total %>% count(CRN_dx_score,Race)
+total %>% count(NAS,Race=="A")
+total %>% count(NAS,Race=="B")
+total %>% count(NAS,Race=="H")
+total %>% count(NAS,Race=="O")
+total %>% count(NAS,Race=="W")
+
+total %>% count(fibrosis_stage,Race=="A")
+total %>% count(fibrosis_stage,Race=="B")
+total %>% count(fibrosis_stage,Race=="H")
+total %>% count(fibrosis_stage,Race=="O")
+total %>% count(fibrosis_stage,Race=="W")
+
+total %>% count(statins)
+df <- total %>% count(CRN_dx_score, statins)
+df <- total %>% count(NAS, statins)
+subset(df, df$statins==1)
+subset(df, df$statins==0)
+subset(df, is.na(df$NAS))
+subset(df, df$statins!=1 & df$statins!=0 | is.na(df$statins))
+total %>% count(fibrosis_stage, statins)
+
+total %>% count(statins)
+total %>% count(CRN_dx_score, statins)
+
+total %>% count(insulin)
+total %>% count(CRN_dx_score, insulin)
+total %>% count(fibrosis_stage, insulin)
+total %>% count(fibrosis_stage, insulin)
+
+total %>% count(fishoil)
+total %>% count(CRN_dx_score, fishoil)
+total %>% count(NAS, fishoil)
+total %>% count(fibrosis_stage, fishoil)
+
+#metformin
+total %>% count(metformin)
+total %>% count(CRN_dx_score, metformin)
+total %>% count(NAS, metformin)
+total %>% count(fibrosis_stage, metformin)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$metformin==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$metformin==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$metformin==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$metformin==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$metformin==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$metformin==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$metformin==1))," (",nrow(subset(total, total$NAS==0 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$metformin==1))," (",nrow(subset(total, total$NAS==1 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$metformin==1))," (",nrow(subset(total, total$NAS==2 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$metformin==1))," (",nrow(subset(total, total$NAS==3 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$metformin==1))," (",nrow(subset(total, total$NAS==4 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$metformin==1))," (",nrow(subset(total, total$NAS==5 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$metformin==1))," (",nrow(subset(total, total$NAS==6 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$metformin==1))," (",nrow(subset(total, total$NAS==7 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$metformin==1))," (",nrow(subset(total, total$NAS==8 & total$metformin==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$metformin==1))," (",nrow(subset(total, is.na(total$NAS) & total$metformin==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$metformin==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$metformin==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$metformin==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$metformin==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$metformin==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$metformin==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$metformin==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$metformin==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$metformin==0)),")")
+
+#tzds
+total %>% count(tzds)
+total %>% count(CRN_dx_score, tzds)
+total %>% count(NAS, tzds)
+total %>% count(fibrosis_stage, tzds)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$tzds==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$tzds==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$tzds==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$tzds==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$tzds==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$tzds==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$tzds==1))," (",nrow(subset(total, total$NAS==0 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$tzds==1))," (",nrow(subset(total, total$NAS==1 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$tzds==1))," (",nrow(subset(total, total$NAS==2 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$tzds==1))," (",nrow(subset(total, total$NAS==3 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$tzds==1))," (",nrow(subset(total, total$NAS==4 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$tzds==1))," (",nrow(subset(total, total$NAS==5 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$tzds==1))," (",nrow(subset(total, total$NAS==6 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$tzds==1))," (",nrow(subset(total, total$NAS==7 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$tzds==1))," (",nrow(subset(total, total$NAS==8 & total$tzds==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$tzds==1))," (",nrow(subset(total, is.na(total$NAS) & total$tzds==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$tzds==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$tzds==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$tzds==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$tzds==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$tzds==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$tzds==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$tzds==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$tzds==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$tzds==0)),")")
+
+#vit_e
+total %>% count(vit_e)
+total %>% count(CRN_dx_score, vit_e)
+total %>% count(NAS, vit_e)
+total %>% count(fibrosis_stage, vit_e)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$vit_e==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$vit_e==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$vit_e==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$vit_e==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$vit_e==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$vit_e==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$vit_e==1))," (",nrow(subset(total, total$NAS==0 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$vit_e==1))," (",nrow(subset(total, total$NAS==1 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$vit_e==1))," (",nrow(subset(total, total$NAS==2 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$vit_e==1))," (",nrow(subset(total, total$NAS==3 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$vit_e==1))," (",nrow(subset(total, total$NAS==4 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$vit_e==1))," (",nrow(subset(total, total$NAS==5 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$vit_e==1))," (",nrow(subset(total, total$NAS==6 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$vit_e==1))," (",nrow(subset(total, total$NAS==7 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$vit_e==1))," (",nrow(subset(total, total$NAS==8 & total$vit_e==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$vit_e==1))," (",nrow(subset(total, is.na(total$NAS) & total$vit_e==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$vit_e==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$vit_e==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$vit_e==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$vit_e==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$vit_e==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$vit_e==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$vit_e==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$vit_e==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$vit_e==0)),")")
+
+#obesity
+total %>% count(obesity)
+total %>% count(CRN_dx_score, obesity)
+total %>% count(NAS, obesity)
+total %>% count(fibrosis_stage, obesity)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$obesity==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$obesity==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$obesity==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$obesity==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$obesity==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$obesity==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$obesity==1))," (",nrow(subset(total, total$NAS==0 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$obesity==1))," (",nrow(subset(total, total$NAS==1 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$obesity==1))," (",nrow(subset(total, total$NAS==2 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$obesity==1))," (",nrow(subset(total, total$NAS==3 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$obesity==1))," (",nrow(subset(total, total$NAS==4 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$obesity==1))," (",nrow(subset(total, total$NAS==5 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$obesity==1))," (",nrow(subset(total, total$NAS==6 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$obesity==1))," (",nrow(subset(total, total$NAS==7 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$obesity==1))," (",nrow(subset(total, total$NAS==8 & total$obesity==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$obesity==1))," (",nrow(subset(total, is.na(total$NAS) & total$obesity==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$obesity==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$obesity==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$obesity==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$obesity==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$obesity==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$obesity==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$obesity==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$obesity==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$obesity==0)),")")
+
+#diabetes
+total %>% count(diabetes)
+total %>% count(CRN_dx_score, diabetes)
+total %>% count(NAS, diabetes)
+total %>% count(fibrosis_stage, diabetes)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$diabetes==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$diabetes==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$diabetes==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$diabetes==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$diabetes==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$diabetes==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$diabetes==1))," (",nrow(subset(total, total$NAS==0 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$diabetes==1))," (",nrow(subset(total, total$NAS==1 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$diabetes==1))," (",nrow(subset(total, total$NAS==2 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$diabetes==1))," (",nrow(subset(total, total$NAS==3 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$diabetes==1))," (",nrow(subset(total, total$NAS==4 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$diabetes==1))," (",nrow(subset(total, total$NAS==5 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$diabetes==1))," (",nrow(subset(total, total$NAS==6 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$diabetes==1))," (",nrow(subset(total, total$NAS==7 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$diabetes==1))," (",nrow(subset(total, total$NAS==8 & total$diabetes==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$diabetes==1))," (",nrow(subset(total, is.na(total$NAS) & total$diabetes==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$diabetes==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$diabetes==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$diabetes==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$diabetes==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$diabetes==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$diabetes==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$diabetes==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$diabetes==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$diabetes==0)),")")
+
+#cad
+total %>% count(cad)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$cad==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$cad==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$cad==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$cad==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$cad==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$cad==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$cad==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$cad==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$cad==1))," (",nrow(subset(total, total$NAS==0 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$cad==1))," (",nrow(subset(total, total$NAS==1 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$cad==1))," (",nrow(subset(total, total$NAS==2 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$cad==1))," (",nrow(subset(total, total$NAS==3 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$cad==1))," (",nrow(subset(total, total$NAS==4 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$cad==1))," (",nrow(subset(total, total$NAS==5 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$cad==1))," (",nrow(subset(total, total$NAS==6 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$cad==1))," (",nrow(subset(total, total$NAS==7 & total$cad==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$cad==1))," (",nrow(subset(total, total$NAS==8 & total$cad==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$cad==1))," (",nrow(subset(total, is.na(total$NAS) & total$cad==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$cad==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$cad==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$cad==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$cad==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$cad==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$cad==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$cad==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$cad==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$cad==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$cad==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$cad==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$cad==0)),")")
+
+#hyperlipid
+total %>% count(hyperlipid)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$hyperlipid==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$hyperlipid==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$hyperlipid==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$hyperlipid==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$hyperlipid==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==0 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==1 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==2 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==3 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==4 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==5 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==6 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==7 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$hyperlipid==1))," (",nrow(subset(total, total$NAS==8 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$hyperlipid==1))," (",nrow(subset(total, is.na(total$NAS) & total$hyperlipid==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$hyperlipid==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$hyperlipid==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$hyperlipid==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$hyperlipid==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$hyperlipid==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$hyperlipid==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$hyperlipid==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$hyperlipid==0)),")")
+
+#hypothryroid
+total %>% count(hypothryroid)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$hypothryroid==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$hypothryroid==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$hypothryroid==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$hypothryroid==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$hypothryroid==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==0 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==1 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==2 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==3 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==4 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==5 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==6 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==7 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$hypothryroid==1))," (",nrow(subset(total, total$NAS==8 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$hypothryroid==1))," (",nrow(subset(total, is.na(total$NAS) & total$hypothryroid==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$hypothryroid==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$hypothryroid==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$hypothryroid==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$hypothryroid==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$hypothryroid==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$hypothryroid==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$hypothryroid==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$hypothryroid==0)),")")
+
+#htn
+total %>% count(htn)
+
+paste0(nrow(subset(total, total$CRN_dx_score==0 & total$htn==1))," (",nrow(subset(total, total$CRN_dx_score==0 & total$htn==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==1 & total$htn==1))," (",nrow(subset(total, total$CRN_dx_score==1 & total$htn==0)),")")
+paste0(nrow(subset(total, total$CRN_dx_score==2 & total$htn==1))," (",nrow(subset(total, total$CRN_dx_score==2 & total$htn==0)),")")
+paste0(nrow(subset(total, is.na(total$CRN_dx_score) & total$htn==1))," (",nrow(subset(total, is.na(total$CRN_dx_score) & total$htn==0)),")")
+
+paste0(nrow(subset(total, total$NAS==0 & total$htn==1))," (",nrow(subset(total, total$NAS==0 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==1 & total$htn==1))," (",nrow(subset(total, total$NAS==1 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==2 & total$htn==1))," (",nrow(subset(total, total$NAS==2 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==3 & total$htn==1))," (",nrow(subset(total, total$NAS==3 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==4 & total$htn==1))," (",nrow(subset(total, total$NAS==4 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==5 & total$htn==1))," (",nrow(subset(total, total$NAS==5 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==6 & total$htn==1))," (",nrow(subset(total, total$NAS==6 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==7 & total$htn==1))," (",nrow(subset(total, total$NAS==7 & total$htn==0)),")")
+paste0(nrow(subset(total, total$NAS==8 & total$htn==1))," (",nrow(subset(total, total$NAS==8 & total$htn==0)),")")
+paste0(nrow(subset(total, is.na(total$NAS) & total$htn==1))," (",nrow(subset(total, is.na(total$NAS) & total$htn==0)),")")
+
+paste0(nrow(subset(total, total$fibrosis_stage==0 & total$htn==1))," (",nrow(subset(total, total$fibrosis_stage==0 & total$htn==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==1 & total$htn==1))," (",nrow(subset(total, total$fibrosis_stage==1 & total$htn==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==2 & total$htn==1))," (",nrow(subset(total, total$fibrosis_stage==2 & total$htn==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==3 & total$htn==1))," (",nrow(subset(total, total$fibrosis_stage==3 & total$htn==0)),")")
+paste0(nrow(subset(total, total$fibrosis_stage==4 & total$htn==1))," (",nrow(subset(total, total$fibrosis_stage==4 & total$htn==0)),")")
+paste0(nrow(subset(total, is.na(total$fibrosis_stage) & total$htn==1))," (",nrow(subset(total, is.na(total$fibrosis_stage) & total$htn==0)),")")
+
+df <- data.frame(matrix(NA,nrow = 19, ncol = 22))
+
+#continuous variables
+vec <- colnames(total[c(5,4,8,10,9,11,31:42,18,15,14)])
+total1 <- select_if(total, colnames(total) %in% vec)
+total1 <- total1[c(1:6,10:21,9,8,7)]
+total1[,7:18][total1[,7:18]==0] <- NA
+
+for(n in 1:length(vec)){
+df[n,1] <- paste0(round(mean(total1[,n], na.rm=T),digits=0)," (",round(sd(total1[,n], na.rm=T),digits=0),")")
+df[n,2] <- paste0(nrow(subset(total1, total1[,n]==0 | is.na(total1[,n]))))
+df[n,3] <- paste0(round(mean(subset(total1, total1[,19]==0)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1[,19]==0)[,n], na.rm=T),digits=0),")")
+df[n,4] <- paste0(round(mean(subset(total1, total1[,19]==1)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1[,19]==1)[,n], na.rm=T),digits=0),")")
+df[n,5] <- paste0(round(mean(subset(total1, total1[,19]==2)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1[,19]==2)[,n], na.rm=T),digits=0),")")
+df[n,6] <- paste0(round(mean(subset(total1, is.na(total1[,19]))[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, is.na(total1[,19]))[,n], na.rm=T),digits=0),")")
+
+df[n,7] <- paste0(round(mean(subset(total1, total1$NAS==0)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==0)[,n], na.rm=T),digits=0),")")
+df[n,8] <- paste0(round(mean(subset(total1, total1$NAS==1)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==1)[,n], na.rm=T),digits=0),")")
+df[n,9] <- paste0(round(mean(subset(total1, total1$NAS==2)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==2)[,n], na.rm=T),digits=0),")")
+df[n,10] <- paste0(round(mean(subset(total1, total1$NAS==3)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==3)[,n], na.rm=T),digits=0),")")
+df[n,11] <- paste0(round(mean(subset(total1, total1$NAS==4)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==4)[,n], na.rm=T),digits=0),")")
+df[n,12] <- paste0(round(mean(subset(total1, total1$NAS==5)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==5)[,n], na.rm=T),digits=0),")")
+df[n,13] <- paste0(round(mean(subset(total1, total1$NAS==6)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==6)[,n], na.rm=T),digits=0),")")
+df[n,14] <- paste0(round(mean(subset(total1, total1$NAS==7)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$NAS==7)[,n], na.rm=T),digits=0),")")
+df[n,15] <- NA
+df[n,16] <- NA
+
+df[n,17] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==0)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$fibrosis_stage==0)[,n], na.rm=T),digits=0),")")
+df[n,18] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==1)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$fibrosis_stage==1)[,n], na.rm=T),digits=0),")")
+df[n,19] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==2)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$fibrosis_stage==2)[,n], na.rm=T),digits=0),")")
+df[n,20] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==3)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$fibrosis_stage==3)[,n], na.rm=T),digits=0),")")
+df[n,21] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==4)[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, total1$fibrosis_stage==4)[,n], na.rm=T),digits=0),")")
+df[n,22] <- paste0(round(mean(subset(total1, is.na(total1$fibrosis_stage))[,n], na.rm=T),digits=0)," (",round(sd(subset(total1, is.na(total1$fibrosis_stage))[,n], na.rm=T),digits=0),")")
+}
+
+for(n in 1:length(vec)){
+  df[n,1] <- paste0(round(mean(total1[,n], na.rm=T),digits=1)," (",round(sd(total1[,n], na.rm=T),digits=1),")")
+  df[n,2] <- paste0(nrow(subset(total1, total1[,n]==0 | is.na(total1[,n]))))
+  df[n,3] <- paste0(round(mean(subset(total1, total1[,19]==0)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1[,19]==0)[,n], na.rm=T),digits=1),")")
+  df[n,4] <- paste0(round(mean(subset(total1, total1[,19]==1)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1[,19]==1)[,n], na.rm=T),digits=1),")")
+  df[n,5] <- paste0(round(mean(subset(total1, total1[,19]==2)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1[,19]==2)[,n], na.rm=T),digits=1),")")
+  df[n,6] <- paste0(round(mean(subset(total1, is.na(total1[,19]))[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, is.na(total1[,19]))[,n], na.rm=T),digits=1),")")
+  
+  df[n,7] <- paste0(round(mean(subset(total1, total1$NAS==0)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==0)[,n], na.rm=T),digits=1),")")
+  df[n,8] <- paste0(round(mean(subset(total1, total1$NAS==1)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==1)[,n], na.rm=T),digits=1),")")
+  df[n,9] <- paste0(round(mean(subset(total1, total1$NAS==2)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==2)[,n], na.rm=T),digits=1),")")
+  df[n,10] <- paste0(round(mean(subset(total1, total1$NAS==3)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==3)[,n], na.rm=T),digits=1),")")
+  df[n,11] <- paste0(round(mean(subset(total1, total1$NAS==4)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==4)[,n], na.rm=T),digits=1),")")
+  df[n,12] <- paste0(round(mean(subset(total1, total1$NAS==5)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==5)[,n], na.rm=T),digits=1),")")
+  df[n,13] <- paste0(round(mean(subset(total1, total1$NAS==6)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==6)[,n], na.rm=T),digits=1),")")
+  df[n,14] <- paste0(round(mean(subset(total1, total1$NAS==7)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$NAS==7)[,n], na.rm=T),digits=1),")")
+  df[n,15] <- NA
+  df[n,16] <- NA
+  
+  df[n,17] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==0)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$fibrosis_stage==0)[,n], na.rm=T),digits=1),")")
+  df[n,18] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==1)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$fibrosis_stage==1)[,n], na.rm=T),digits=1),")")
+  df[n,19] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==2)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$fibrosis_stage==2)[,n], na.rm=T),digits=1),")")
+  df[n,20] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==3)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$fibrosis_stage==3)[,n], na.rm=T),digits=1),")")
+  df[n,21] <- paste0(round(mean(subset(total1, total1$fibrosis_stage==4)[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, total1$fibrosis_stage==4)[,n], na.rm=T),digits=1),")")
+  df[n,22] <- paste0(round(mean(subset(total1, is.na(total1$fibrosis_stage))[,n], na.rm=T),digits=1)," (",round(sd(subset(total1, is.na(total1$fibrosis_stage))[,n], na.rm=T),digits=1),")")
+}
+
+### filter reads to pharmacogenes ####
+reads <- read.csv("directory/NASH/NASH_RNAseq_data_logTPM_norm.txt", row.names=1, sep="")
+c <- read.csv("directory/Visium/Transporters and Pharmacogenes (Expanded).csv", header=FALSE)
+c <- c$V2
+reads <- subset(reads,rownames(reads) %in% c)
+b2 <- as.data.frame(t(reads))
+rm(c, reads)
+#for values of zero, log(0) returns -Inf... these are still good data, so change to lowest value across all samples
+#this is a conservative approach
+for(n in 1:ncol(b2)){
+  x <- min(b2[,n][is.finite(b2[,n])])
+  y <- "-Inf"
+  for(i in 1:nrow(b2)){
+    b2[i,n][b2[i,n] %in% y] <- x
+  }
+}
+
+################## Regressions for SAF ###################################
+histology$reads_ID <- gsub("-","\\.",histology$reads_ID)
+row.names(histology) <- histology$reads_ID
+
+d <- merge(histology,b2,by=0)
+p.gene.lm <- as.data.frame(row.names(reads))
+colnames(p.gene.lm) <- "gene"
+c <- row.names(reads)
+
+for(n in 1:nrow(p.gene.lm)){
+  x <- c[n]
+  #d1 <- d[c("NAS_score",x)]
+  d1 <- d[c("SAF_dx_score",x)]
+  colnames(d1) <- c("SAF","RNA")
+  fit <- summary(lm(RNA~SAF,data=d1))
+  p.gene.lm[n,2] <- x
+  p.gene.lm[n,3] <- fit$coefficients[2]
+  p.gene.lm[n,4] <- fit$coefficients[2,4]
+  p.gene.lm[n,5] <- fit$r.squared
+}
+p.gene.lm <- p.gene.lm[-c(1)]
+colnames(p.gene.lm) <- c("gene","slope","p_value","r_squared")
+p.gene.lm$p_value_bonferonni <- p.gene.lm$p_value*(length(c))
+p.gene.lm <- p.gene.lm[order(p.gene.lm$p_value_bonferonni),]
+row.names(p.gene.lm) <- NULL
+
+t1 <- subset(p.gene.lm, p.gene.lm[5]<=0.05)
+t1$group <- "SAF Regression"
+write.csv(p.gene.lm,"directory/pharmacogene_SAF_regression_results_logTPM.csv")
+
+### pearson correlation between SAF and CRN ###
+CRN <- read_excel("directory/Supplemental Data Frames.xlsx", sheet = "steatohep regression all result")
+
+x <- merge(CRN, p.gene.lm,by="gene")
+cor(x$slope.x, x$slope.y, method="pearson")
+cor(x$p_value.x, x$p_value.y, method="spearman")
+
+ggplot()+geom_density(data=x, aes(slope.x))
+
+### density plots ###
+density_demo <- list()
+for(n in 1:6){
+  z <- demographics[n+3]
+  colnames(z) <- "blah"
+  density_demo[[n]] <- ggplot()+geom_density(data=z, aes(blah))+xlab(colnames(demographics)[n+3])
+}
+
+box_demo <- list()
+for(n in 1:6){
+  z <- demographics[n+3]
+  colnames(z) <- "blah"
+  box_demo[[n]] <- ggplot()+geom_boxplot(data=z, aes(blah))+xlab(colnames(demographics)[n+3])
+}
+
+bar_cond <- list()
+for(n in 1:6){
+  z <- conditions[n+2]
+  colnames(z) <- "blah"
+  bar_cond[[n]] <- ggplot()+geom_bar(data=z, aes(blah))+xlab(colnames(conditions)[n+2])
+}
+bar_cond[3]
+
+
+
+
+
+##### covariate associations with CYP2C19 #####
+total$reads_ID <- gsub("-","\\.",total$reads_ID)
+rownames(total) <- total$reads_ID
+
+total <- total[-c(1,2)]
+total <- total[-c(10,15)]
+total$Sex[total$Sex=="M"] <- 1
+total$Sex[total$Sex=="F"] <- 2
+total$Sex <- as.numeric(as.character(total$Sex))
+
+total[27:38][total[27:38]==0] <- NA
+total <- total[-c(39)]
+
+total[15:26][total[15:26]==2] <- NA
+
+c19 <- select_if(b2, colnames(b2)=="CYP2C19")
+
+total <- merge(c19, total, by=0)
+rownames(total) <- total$Row.names
+total <- total[-c(1)]
+
+race <- total[c(1,5)]
+total <- total[-c(5)]
+total <- total[-c(13)]
+
+# regressions with CYP2C19
+total <- total %>% relocate(CYP2C19)
+
+con <- data.frame()
+for(n in 1:(ncol(total)-1)){
+  var <- as.symbol(colnames(total[n+1]))
+  x <- as.data.frame(summary(lm(paste0("CYP2C19~",var), total))$coefficients)
+
+  con <- rbind(con,x)
+}
+
+con <- subset(con, !grepl("Intercept",rownames(con)))
+con$bon <- con$`Pr(>|t|)`*nrow(con)
+
+write.table(con, file="directory/not for submission/CYP2C19_cov_regression.csv",sep = ",")
+
+# regressions with fibrosis stage
+total <- total %>% relocate(fibrosis_stage)
+
+con <- data.frame()
+for(n in 1:(ncol(total)-1)){
+  var <- as.symbol(colnames(total[n+1]))
+  x <- as.data.frame(summary(lm(paste0("fibrosis_stage~",var), total))$coefficients)
+  
+  con <- rbind(con,x)
+}
+
+con <- subset(con, !grepl("Intercept",rownames(con)))
+con$bon <- con$`Pr(>|t|)`*37
+
+write.table(con, file="directory/not for submission/fibrosis_cov_regression.csv",row.names = T,col.names = T, sep = ",")
+
+# regressions with NAS
+total <- total %>% relocate(NAS)
+
+con <- data.frame()
+for(n in 1:(ncol(total)-1)){
+  var <- as.symbol(colnames(total[n+1]))
+  x <- as.data.frame(summary(lm(paste0("NAS~",var), total))$coefficients)
+  
+  con <- rbind(con,x)
+}
+
+con <- subset(con, !grepl("Intercept",rownames(con)))
+con$bon <- con$`Pr(>|t|)`*37
+
+write.table(con, file="directory/not for submission/NAS_cov_regression.csv",row.names = T,col.names = T, sep = ",")
+
+# regressions with sth
+total <- total %>% relocate(CRN_dx_score)
+
+con <- data.frame()
+for(n in 1:(ncol(total)-1)){
+  var <- as.symbol(colnames(total[n+1]))
+  x <- as.data.frame(summary(lm(paste0("CRN_dx_score~",var), total))$coefficients)
+  
+  con <- rbind(con,x)
+}
+
+con <- subset(con, !grepl("Intercept",rownames(con)))
+con$bon <- con$`Pr(>|t|)`*37
+
+write.table(con, file="directory/not for submission/STH_cov_regression.csv",row.names = T,col.names = T, sep = ",")
+
+#### visualizing balance of covariates with NAFLD phenotypes  ####
+figures <- list()
+
+figures[[1]] <- ggplot()+geom_point(data=total, aes(x=age, y=NAS))+geom_smooth(data=total, aes(x=age, y=NAS), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(NAS~age,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(NAS~age,data=total))$coefficients[2,1],digits=2)))
+
+figures[[2]] <- ggplot()+geom_point(data=total, aes(x=age, y=CRN_dx_score))+geom_smooth(data=total, aes(x=age, y=CRN_dx_score), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(CRN_dx_score~age,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(CRN_dx_score~age,data=total))$coefficients[2,1],digits=2)))
+
+figures[[3]] <- ggplot()+geom_point(data=total, aes(x=age, y=fibrosis_stage))+geom_smooth(data=total, aes(x=age, y=fibrosis_stage), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(fibrosis_stage~age,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(fibrosis_stage~age,data=total))$coefficients[2,1],digits=2)))
+
+
+
+figures[[4]] <- ggplot()+geom_point(data=total, aes(x=ast, y=NAS))+geom_smooth(data=total, aes(x=ast, y=NAS), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(NAS~ast,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(NAS~ast,data=total))$coefficients[2,1],digits=2)))
+
+figures[[5]] <- ggplot()+geom_point(data=total, aes(x=ast, y=CRN_dx_score))+geom_smooth(data=total, aes(x=ast, y=CRN_dx_score), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(CRN_dx_score~ast,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(CRN_dx_score~ast,data=total))$coefficients[2,1],digits=2)))
+
+figures[[6]] <- ggplot()+geom_point(data=total, aes(x=ast, y=fibrosis_stage))+geom_smooth(data=total, aes(x=ast, y=fibrosis_stage), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(fibrosis_stage~ast,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(fibrosis_stage~ast,data=total))$coefficients[2,1],digits=2)))
+
+
+
+figures[[7]] <- ggplot()+geom_point(data=total, aes(x=diabetes, y=NAS))+geom_smooth(data=total, aes(x=diabetes, y=NAS), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(NAS~diabetes,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(NAS~diabetes,data=total))$coefficients[2,1],digits=2)))
+
+figures[[8]] <- ggplot()+geom_point(data=total, aes(x=diabetes, y=CRN_dx_score))+geom_smooth(data=total, aes(x=diabetes, y=CRN_dx_score), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(CRN_dx_score~diabetes,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(CRN_dx_score~diabetes,data=total))$coefficients[2,1],digits=2)))
+
+figures[[9]] <- ggplot()+geom_point(data=total, aes(x=diabetes, y=fibrosis_stage))+geom_smooth(data=total, aes(x=diabetes, y=fibrosis_stage), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(fibrosis_stage~diabetes,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(fibrosis_stage~diabetes,data=total))$coefficients[2,1],digits=2)))
+
+
+
+figures[[10]] <- ggplot()+geom_point(data=total, aes(x=Sex, y=NAS))+geom_smooth(data=total, aes(x=Sex, y=NAS), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(NAS~Sex,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(NAS~Sex,data=total))$coefficients[2,1],digits=2)))
+
+figures[[11]] <- ggplot()+geom_point(data=total, aes(x=Sex, y=CRN_dx_score))+geom_smooth(data=total, aes(x=Sex, y=CRN_dx_score), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(CRN_dx_score~Sex,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(CRN_dx_score~Sex,data=total))$coefficients[2,1],digits=2)))
+
+figures[[12]] <- ggplot()+geom_point(data=total, aes(x=Sex, y=fibrosis_stage))+geom_smooth(data=total, aes(x=Sex, y=fibrosis_stage), method="lm")+
+  ggtitle(paste0("P-value = ",round(summary(lm(fibrosis_stage~Sex,data=total))$coefficients[2,4],digits=2),"  Slope = ",round(summary(lm(fibrosis_stage~Sex,data=total))$coefficients[2,1],digits=2)))
+
+
+#### sensitivity-style analysis  ####
+total <- total %>% relocate(CYP2C19)
+total <- total %>% relocate(NAS)
+
+total2 <- select_if(total, colnames(total) %in% c("CYP2C19", "NAS", "ast", "age", "diabetes", "Sex","alt","metformin"))
+x1 <- data.frame()
+for(n in 1:(ncol(total2)-2)){
+  x1[n,1] <- colnames(total2)[n+2]
+  y <- as.symbol(colnames(total2)[n+2])
+  x1[n,2] <- (summary(lm(paste0("CYP2C19~NAS"), total2))$coefficients[2,1]-summary(lm(paste0("CYP2C19~NAS+",y), total2))$coefficients[2,1])/abs(summary(lm(paste0("CYP2C19~NAS"), total2))$coefficients[2,1])
+  #x1[n,3] <- summary(lm(paste0("CYP2C19~NAS+",y), total2))$coefficients[3,4]
+}
+x1$group <- "NAS"
+# summary(lm(CYP2C19~NAS, data=total))
+# summary(lm(CYP2C19~NAS+ast, data=total))
+# 
+# summary(lm(CYP2C19~NAS, data=total))
+# summary(lm(CYP2C19~NAS+alt, data=total))
+
+total <- total %>% relocate(CYP2C19)
+total <- total %>% relocate(fibrosis_stage)
+
+total2 <- select_if(total, colnames(total) %in% c("CYP2C19", "fibrosis_stage", "ast", "age", "diabetes", "Sex","alt","metformin"))
+x2 <- data.frame()
+for(n in 1:(ncol(total2)-2)){
+  x2[n,1] <- colnames(total2)[n+2]
+  y <- as.symbol(colnames(total2)[n+2])
+  x2[n,2] <- (summary(lm(paste0("CYP2C19~fibrosis_stage"), total2))$coefficients[2,1]-summary(lm(paste0("CYP2C19~fibrosis_stage+",y), total2))$coefficients[2,1])/abs(summary(lm(paste0("CYP2C19~fibrosis_stage"), total2))$coefficients[2,1])
+  #x2[n,3] <- summary(lm(paste0("CYP2C19~fibrosis_stage+",y), total2))$coefficients[3,4]
+}
+x2$group <- "fibrosis_stage"
+# summary(lm(CYP2C19~fibrosis_stage, data=total))
+# summary(lm(CYP2C19~fibrosis_stage+ast, data=total))
+# 
+# summary(lm(CYP2C19~fibrosis_stage, data=total))
+# summary(lm(CYP2C19~fibrosis_stage+alt, data=total))
+
+total <- total %>% relocate(CYP2C19)
+total <- total %>% relocate(CRN_dx_score)
+
+total2 <- select_if(total, colnames(total) %in% c("CYP2C19", "CRN_dx_score", "ast", "age", "diabetes", "Sex","alt","metformin"))
+x3 <- data.frame()
+for(n in 1:(ncol(total2)-2)){
+  x3[n,1] <- colnames(total2)[n+2]
+  y <- as.symbol(colnames(total2)[n+2])
+  x3[n,2] <- (summary(lm(paste0("CYP2C19~CRN_dx_score"), total2))$coefficients[2,1]-summary(lm(paste0("CYP2C19~CRN_dx_score+",y), total2))$coefficients[2,1])/abs(summary(lm(paste0("CYP2C19~CRN_dx_score"), total2))$coefficients[2,1])
+  #x3[n,3] <- summary(lm(paste0("CYP2C19~CRN_dx_score+",y), total2))$coefficients[3,4]
+}
+x3$group <- "CRN_dx_score"
+
+# summary(lm(CYP2C19~CRN_dx_score, data=total))
+# summary(lm(CYP2C19~CRN_dx_score+ast, data=total))
+# 
+# summary(lm(CYP2C19~CRN_dx_score, data=total))
+# summary(lm(CYP2C19~CRN_dx_score+alt, data=total))
+
+x <- rbind(x1,x2,x3)
+write.table(x, file="directory/not for submission/cov_deltas_regression.csv",row.names = T,col.names = T, sep = ",")
+
+### stratify-style covariate analysis ####
+nodb <- subset(total, total$diabetes==0)
+db <- subset(total, total$diabetes==1)
+summary(lm(CYP2C19~fibrosis_stage, nodb))
+summary(lm(CYP2C19~fibrosis_stage, db))
+
+summary(lm(CYP2C19~NAS, nodb))
+summary(lm(CYP2C19~NAS, db))
+
+summary(lm(CYP2C19~CRN_dx_score, nodb))
+summary(lm(CYP2C19~CRN_dx_score, db))
+
+
+
+ggplot()+
+  geom_boxplot(data=subset(total, !is.na(total$diabetes) & !is.na(total$fibrosis_stage)),aes(x=as.factor(fibrosis_stage),y=CYP2C19,fill=as.factor(diabetes)),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust=0.5,color="black"),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "top",
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank())+
+  geom_point(data=subset(total, !is.na(total$diabetes) & !is.na(total$fibrosis_stage)), aes(x=as.factor(fibrosis_stage), y=CYP2C19, fill=as.factor(diabetes)),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = 0.75),size=1)
+
+ggplot()+
+  geom_boxplot(data=subset(total, !is.na(total$diabetes) & !is.na(total$NAS)),aes(x=as.factor(NAS),y=CYP2C19,fill=as.factor(diabetes)),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust=0.5,color="black"),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "top",
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank())+
+  geom_point(data=subset(total, !is.na(total$diabetes) & !is.na(total$NAS)), aes(x=as.factor(NAS), y=CYP2C19, fill=as.factor(diabetes)),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = 0.75),size=1)
+
+ggplot()+
+  geom_boxplot(data=subset(total, !is.na(total$diabetes) & !is.na(total$CRN_dx_score)),aes(x=as.factor(CRN_dx_score),y=CYP2C19,fill=as.factor(diabetes)),outlier.shape = NA,alpha=0.9)+
+  theme(
+    axis.text.x = element_text(angle = 90,size=10,vjust=0.5,color="black"),
+    axis.title.y = element_text(size=10),
+    axis.title.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "top",
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.title = element_blank())+
+  geom_point(data=subset(total, !is.na(total$diabetes) & !is.na(total$CRN_dx_score)), aes(x=as.factor(CRN_dx_score), y=CYP2C19, fill=as.factor(diabetes)),
+             position = position_jitterdodge(jitter.width = 0.15,dodge.width = 0.75),size=1)
+
+
+##### regresssions with sex and age as covariates  #########
+dd <- merge(total[c("CRN_dx_score","NAS","fibrosis_stage","Sex","age")],b2,by=0)
+rownames(dd) <- dd[,1]
+dd <- dd[-c(1)]
+
+##CRN_dx_score
+p.gene.lm <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm)){
+  x <- p.gene.lm[n,1]
+  d1 <- dd[c("CRN_dx_score",x,"age","Sex")]
+  colnames(d1) <- c("CRN_dx_score","RNA","age","Sex")
+  fit <- summary(lm(RNA~CRN_dx_score+age+Sex,data=d1))
+  p.gene.lm[n,2] <- x
+  p.gene.lm[n,3] <- fit$coefficients[2]
+  p.gene.lm[n,4] <- fit$coefficients[2,4]
+  p.gene.lm[n,5] <- fit$r.squared
+}
+p.gene.lm <- p.gene.lm[-c(1)]
+colnames(p.gene.lm) <- c("gene","slope","p_value","r_squared")
+p.gene.lm$p_value_bonferonni <- p.gene.lm$p_value*(nrow(p.gene.lm))
+p.gene.lm <- p.gene.lm[order(p.gene.lm$p_value_bonferonni),]
+row.names(p.gene.lm) <- NULL
+
+#without sex and age
+p.gene.lm1 <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm1)){
+  x <- p.gene.lm1[n,1]
+  d1 <- dd[c("CRN_dx_score",x,"age","Sex")]
+  colnames(d1) <- c("CRN_dx_score","RNA","age","Sex")
+  fit <- summary(lm(RNA~CRN_dx_score,data=d1))
+  p.gene.lm1[n,2] <- x
+  p.gene.lm1[n,3] <- fit$coefficients[2]
+  p.gene.lm1[n,4] <- fit$coefficients[2,4]
+  p.gene.lm1[n,5] <- fit$r.squared
+}
+p.gene.lm1 <- p.gene.lm1[-c(1)]
+colnames(p.gene.lm1) <- c("gene","slope","p_value","r_squared")
+p.gene.lm1$p_value_bonferonni <- p.gene.lm1$p_value*(nrow(p.gene.lm1))
+p.gene.lm1 <- p.gene.lm1[order(p.gene.lm1$p_value_bonferonni),]
+row.names(p.gene.lm1) <- NULL
+
+corr <- merge(p.gene.lm[1:2],p.gene.lm1[1:2],by="gene")
+cor(corr$slope.x,corr$slope.y,method="pearson")
+
+write.table(p.gene.lm, file="directory/not for submission/pgene_regression_sth_w_age_w_sex.csv",row.names = T,col.names = T, sep = ",")
+
+
+##fibrosis_stage
+p.gene.lm <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm)){
+  x <- p.gene.lm[n,1]
+  d1 <- dd[c("fibrosis_stage",x,"age","Sex")]
+  colnames(d1) <- c("fibrosis_stage","RNA","age","Sex")
+  fit <- summary(lm(RNA~fibrosis_stage+age+Sex,data=d1))
+  p.gene.lm[n,2] <- x
+  p.gene.lm[n,3] <- fit$coefficients[2]
+  p.gene.lm[n,4] <- fit$coefficients[2,4]
+  p.gene.lm[n,5] <- fit$r.squared
+}
+p.gene.lm <- p.gene.lm[-c(1)]
+colnames(p.gene.lm) <- c("gene","slope","p_value","r_squared")
+p.gene.lm$p_value_bonferonni <- p.gene.lm$p_value*(nrow(p.gene.lm))
+p.gene.lm <- p.gene.lm[order(p.gene.lm$p_value_bonferonni),]
+row.names(p.gene.lm) <- NULL
+
+#without sex and age
+p.gene.lm1 <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm1)){
+  x <- p.gene.lm1[n,1]
+  d1 <- dd[c("fibrosis_stage",x,"age","Sex")]
+  colnames(d1) <- c("fibrosis_stage","RNA","age","Sex")
+  fit <- summary(lm(RNA~fibrosis_stage,data=d1))
+  p.gene.lm1[n,2] <- x
+  p.gene.lm1[n,3] <- fit$coefficients[2]
+  p.gene.lm1[n,4] <- fit$coefficients[2,4]
+  p.gene.lm1[n,5] <- fit$r.squared
+}
+p.gene.lm1 <- p.gene.lm1[-c(1)]
+colnames(p.gene.lm1) <- c("gene","slope","p_value","r_squared")
+p.gene.lm1$p_value_bonferonni <- p.gene.lm1$p_value*(nrow(p.gene.lm1))
+p.gene.lm1 <- p.gene.lm1[order(p.gene.lm1$p_value_bonferonni),]
+row.names(p.gene.lm1) <- NULL
+
+corr <- merge(p.gene.lm[1:2],p.gene.lm1[1:2],by="gene")
+cor(corr$slope.x,corr$slope.y,method="pearson")
+
+write.table(p.gene.lm, file="directory/not for submission/pgene_regression_fibrosis_w_age_w_sex.csv",row.names = T,col.names = T, sep = ",")
+
+
+##NAS
+p.gene.lm <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm)){
+  x <- p.gene.lm[n,1]
+  d1 <- dd[c("NAS",x,"age","Sex")]
+  colnames(d1) <- c("NAS","RNA","age","Sex")
+  fit <- summary(lm(RNA~NAS+age+Sex,data=d1))
+  p.gene.lm[n,2] <- x
+  p.gene.lm[n,3] <- fit$coefficients[2]
+  p.gene.lm[n,4] <- fit$coefficients[2,4]
+  p.gene.lm[n,5] <- fit$r.squared
+}
+p.gene.lm <- p.gene.lm[-c(1)]
+colnames(p.gene.lm) <- c("gene","slope","p_value","r_squared")
+p.gene.lm$p_value_bonferonni <- p.gene.lm$p_value*(nrow(p.gene.lm))
+p.gene.lm <- p.gene.lm[order(p.gene.lm$p_value_bonferonni),]
+row.names(p.gene.lm) <- NULL
+
+#without sex and age
+p.gene.lm1 <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm1)){
+  x <- p.gene.lm1[n,1]
+  d1 <- dd[c("NAS",x,"age","Sex")]
+  colnames(d1) <- c("NAS","RNA","age","Sex")
+  fit <- summary(lm(RNA~NAS,data=d1))
+  p.gene.lm1[n,2] <- x
+  p.gene.lm1[n,3] <- fit$coefficients[2]
+  p.gene.lm1[n,4] <- fit$coefficients[2,4]
+  p.gene.lm1[n,5] <- fit$r.squared
+}
+p.gene.lm1 <- p.gene.lm1[-c(1)]
+colnames(p.gene.lm1) <- c("gene","slope","p_value","r_squared")
+p.gene.lm1$p_value_bonferonni <- p.gene.lm1$p_value*(nrow(p.gene.lm1))
+p.gene.lm1 <- p.gene.lm1[order(p.gene.lm1$p_value_bonferonni),]
+row.names(p.gene.lm1) <- NULL
+
+corr <- merge(p.gene.lm[1:2],p.gene.lm1[1:2],by="gene")
+cor(corr$slope.x,corr$slope.y,method="pearson")
+
+write.table(p.gene.lm, file="directory/not for submission/pgene_regression_nas_w_age_w_sex.csv",row.names = T,col.names = T, sep = ",")
+
+###### multivariable ########
+summary(lm(CYP2C19~fibrosis_stage+CRN_dx_score+ballooning+NAS+ast+age+diabetes+lob_inflam_amt+metformin+alt, data=total))
+
+full.model <- lm(CYP2C19~., data=total)
+#need to prune variables down
+total <- total %>% relocate(CYP2C19)
+
+con <- data.frame()
+for(n in 1:(ncol(total)-1)){
+  var <- as.symbol(colnames(total[n+1]))
+  x <- as.data.frame(summary(lm(paste0("CYP2C19~",var), total))$coefficients)
+  
+  con <- rbind(con,x)
+}
+
+con <- subset(con, !grepl("Intercept",rownames(con)))
+con$bon <- con$`Pr(>|t|)`*nrow(con)
+
+total1 <- select_if(total, colnames(total) %in% c("CYP2C19",rownames(subset(con,con$`Pr(>|t|)`<.05))))
+
+full.model <- lm(CYP2C19~., data=total1)
+summary(full.model)
+
+x <- as.data.frame(summary(full.model)$coefficients)
+x <- x[order(x$`Pr(>|t|)`),]
+x <- x[-c(nrow(x)),]
+total1 <- select_if(total1, colnames(total1) %in% c("CYP2C19",rownames(x)))
+step.model <- lm(CYP2C19~.,data=total1)
+summary(step.model)
+
+x <- as.data.frame(summary(step.model)$coefficients)
+x <- x[order(x$`Pr(>|t|)`),]
+x
+x <- x[-c(nrow(x)),]
+total1 <- select_if(total1, colnames(total1) %in% c("CYP2C19",rownames(x)))
+step.model <- lm(CYP2C19~.,data=total1)
+summary(step.model)
+
+x <- as.data.frame(summary(step.model)$coefficients)
+x <- x[order(x$`Pr(>|t|)`),]
+x
+x <- x[-c(nrow(x)),]
+total1 <- select_if(total1, colnames(total1) %in% c("CYP2C19",rownames(x)))
+step.model <- lm(CYP2C19~.,data=total1)
+summary(step.model)
+
+x <- as.data.frame(summary(step.model)$coefficients)
+x <- x[order(x$`Pr(>|t|)`),]
+x
+x <- x[-c(nrow(x)),]
+total1 <- select_if(total1, colnames(total1) %in% c("CYP2C19",rownames(x)))
+step.model <- lm(CYP2C19~.,data=total1)
+summary(step.model)
+
+x <- as.data.frame(summary(step.model)$coefficients)
+x <- x[order(x$`Pr(>|t|)`),]
+x
+x <- x[-c(nrow(x)),]
+total1 <- select_if(total1, colnames(total1) %in% c("CYP2C19",rownames(x)))
+step.model <- lm(CYP2C19~.,data=total1)
+summary(step.model)
+
+x <- as.data.frame(summary(step.model)$coefficients)
+x <- x[order(x$`Pr(>|t|)`),]
+x
+x <- x[-c(nrow(x)),]
+total1 <- select_if(total1, colnames(total1) %in% c("CYP2C19",rownames(x)))
+step.model <- lm(CYP2C19~.,data=total1)
+y <- summary(step.model)$coefficients
+write.table(y, file="directory/not for submission/mult_regression_backward.05.csv",row.names = T,col.names = T, sep = ",")
+
+confint(step.model, level = 0.95)
+
+##### race #########
+summary(aov(CYP2C19~Race, data = race))
+ggplot(data=race, aes(x=as.factor(Race),y=CYP2C19))+geom_boxplot()+geom_jitter()
+
+######### addint in confidence intervals and std. error #############
+
+p.gene.lm1 <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm1)){
+  x <- p.gene.lm1[n,1]
+  d1 <- dd[c("NAS",x)]
+  colnames(d1) <- c("NAS","RNA")
+  fit <- summary(lm(RNA~NAS,data=d1))
+  p.gene.lm1[n,2] <- x
+  p.gene.lm1[n,3] <- fit$coefficients[2]
+  p.gene.lm1[n,4] <- fit$coefficients[2,4]
+  p.gene.lm1[n,5] <- fit$r.squared
+  p.gene.lm1[n,6] <- fit$coefficients[2,2]
+  p.gene.lm1[n,7] <- confint(lm(RNA~NAS,data=d1))[2,1]
+  p.gene.lm1[n,8] <- confint(lm(RNA~NAS,data=d1))[2,2]
+}
+
+p.gene.lm1 <- p.gene.lm1[-c(1)]
+colnames(p.gene.lm1) <- c("gene","slope","p_value","r_squared","std.error","lower_95%CI","upper_95%CI")
+p.gene.lm1$p_value_bonferonni <- p.gene.lm1$p_value*(nrow(p.gene.lm1))
+p.gene.lm1 <- p.gene.lm1[order(p.gene.lm1$p_value_bonferonni),]
+row.names(p.gene.lm1) <- NULL
+
+write.table(p.gene.lm1, file="directory/not for submission/pgene_regression_nas.csv",row.names = T,col.names = T, sep = ",")
+
+
+p.gene.lm1 <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm1)){
+  x <- p.gene.lm1[n,1]
+  d1 <- dd[c("fibrosis_stage",x)]
+  colnames(d1) <- c("fibrosis_stage","RNA")
+  fit <- summary(lm(RNA~fibrosis_stage,data=d1))
+  p.gene.lm1[n,2] <- x
+  p.gene.lm1[n,3] <- fit$coefficients[2]
+  p.gene.lm1[n,4] <- fit$coefficients[2,4]
+  p.gene.lm1[n,5] <- fit$r.squared
+  p.gene.lm1[n,6] <- fit$coefficients[2,2]
+  p.gene.lm1[n,7] <- confint(lm(RNA~fibrosis_stage,data=d1))[2,1]
+  p.gene.lm1[n,8] <- confint(lm(RNA~fibrosis_stage,data=d1))[2,2]
+}
+
+p.gene.lm1 <- p.gene.lm1[-c(1)]
+colnames(p.gene.lm1) <- c("gene","slope","p_value","r_squared","std.error","lower_95%CI","upper_95%CI")
+p.gene.lm1$p_value_bonferonni <- p.gene.lm1$p_value*(nrow(p.gene.lm1))
+p.gene.lm1 <- p.gene.lm1[order(p.gene.lm1$p_value_bonferonni),]
+row.names(p.gene.lm1) <- NULL
+
+write.table(p.gene.lm1, file="directory/not for submission/pgene_regression_fibrosis_stage.csv",row.names = T,col.names = T, sep = ",")
+
+
+p.gene.lm1 <- data.frame(colnames(b2))
+
+for(n in 1:nrow(p.gene.lm1)){
+  x <- p.gene.lm1[n,1]
+  d1 <- dd[c("CRN_dx_score",x)]
+  colnames(d1) <- c("CRN_dx_score","RNA")
+  fit <- summary(lm(RNA~CRN_dx_score,data=d1))
+  p.gene.lm1[n,2] <- x
+  p.gene.lm1[n,3] <- fit$coefficients[2]
+  p.gene.lm1[n,4] <- fit$coefficients[2,4]
+  p.gene.lm1[n,5] <- fit$r.squared
+  p.gene.lm1[n,6] <- fit$coefficients[2,2]
+  p.gene.lm1[n,7] <- confint(lm(RNA~CRN_dx_score,data=d1))[2,1]
+  p.gene.lm1[n,8] <- confint(lm(RNA~CRN_dx_score,data=d1))[2,2]
+}
+
+p.gene.lm1 <- p.gene.lm1[-c(1)]
+colnames(p.gene.lm1) <- c("gene","slope","p_value","r_squared","std.error","lower_95%CI","upper_95%CI")
+p.gene.lm1$p_value_bonferonni <- p.gene.lm1$p_value*(nrow(p.gene.lm1))
+p.gene.lm1 <- p.gene.lm1[order(p.gene.lm1$p_value_bonferonni),]
+row.names(p.gene.lm1) <- NULL
+
+write.table(p.gene.lm1, file="directory/not for submission/pgene_regression_CRN_dx_score.csv",row.names = T,col.names = T, sep = ",")
+
+########### fibrosis without nash ############
+
+y <- as.data.frame(summary(lm(CYP2C19~NAS, data=subset(total, total$fibrosis_stage==0)))$coefficients)
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~NAS, data=subset(total, total$fibrosis_stage==1)))$coefficients))
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~NAS, data=subset(total, total$fibrosis_stage==2)))$coefficients))
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~NAS, data=subset(total, total$fibrosis_stage==3)))$coefficients))
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~NAS, data=subset(total, total$fibrosis_stage==4)))$coefficients))
+y <- subset(y, !grepl("(Intercept)",rownames(y)))
+rownames(y) <- paste0("fibrosis_stage_",seq(0,4))
+write.table(y, file="directory/not for submission/NAS_mult.csv",
+            row.names = T,col.names = T, sep = ",")
+
+y <- as.data.frame(summary(lm(CYP2C19~CRN_dx_score, data=subset(total, total$fibrosis_stage==0)))$coefficients)
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~CRN_dx_score, data=subset(total, total$fibrosis_stage==1)))$coefficients))
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~CRN_dx_score, data=subset(total, total$fibrosis_stage==2)))$coefficients))
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~CRN_dx_score, data=subset(total, total$fibrosis_stage==3)))$coefficients))
+y <- rbind(y,as.data.frame(summary(lm(CYP2C19~CRN_dx_score, data=subset(total, total$fibrosis_stage==4)))$coefficients))
+y <- subset(y, !grepl("(Intercept)",rownames(y)))
+rownames(y) <- paste0("fibrosis_stage_",seq(0,4))
+write.table(y, file="directory/not for submission/CRN_dx_score_mult.csv",
+            row.names = T,col.names = T, sep = ",")
+
+summary(lm(CYP2C19~NAS+fibrosis_stage+CRN_dx_score, data=total))
+y <- summary(lm(CYP2C19~NAS+fibrosis_stage+CRN_dx_score, data=total))$coefficients
+write.table(y, file="directory/not for submission/t.csv",
+            row.names = T,col.names = T, sep = ",")
+summary(lm(CYP2C19~fibrosis_stage+CRN_dx_score, data=total))
+
+summary(lm(CYP2C19~fibrosis_stage, data=total))
